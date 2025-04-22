@@ -25,7 +25,11 @@ export function withApplyDefault(
 	if (field.references?.model) {
 		return new StringRecordId(value);
 	}
-	if (field.fieldName?.endsWith("Id") && field.fieldName !== "providerId") {
+	if (
+		field.fieldName?.endsWith("Id") &&
+		field.fieldName !== "providerId" &&
+		field.fieldName !== "activeOrganizationId"
+	) {
 		return new StringRecordId(value);
 	}
 	if (typeof value === "string" && isDateString(value)) {

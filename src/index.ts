@@ -70,7 +70,7 @@ const createTransform = (options: BetterAuthOptions) => {
 			const transformedData: Record<string, unknown> =
 				data.id || data._id
 					? select.length === 0 || select.includes("id")
-						? { id: data.id }
+						? { id: jsonify(data.id) }
 						: {}
 					: {};
 			const tableSchema = schema[model].fields;
@@ -80,7 +80,7 @@ const createTransform = (options: BetterAuthOptions) => {
 				}
 				const field = tableSchema[key];
 				if (field) {
-					transformedData[key] = data[field.fieldName || key];
+					transformedData[key] = jsonify(data[field.fieldName || key]);
 				}
 			}
 			return transformedData as T;
