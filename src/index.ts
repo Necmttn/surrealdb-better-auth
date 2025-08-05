@@ -121,60 +121,8 @@ const createTransform = (options: BetterAuthOptions) => {
 };
 
 export const surrealAdapter =
-	(config: SurrealConfig) =>
+	(db: Surreal, config?: SurrealConfig) =>
 		(options: BetterAuthOptions): Adapter => {
-			let db: Surreal | null = null;
-			let isConnecting = false;
-			let connectionPromise: Promise<Surreal> | null = null;
-
-			const ensureConnection = async () => {
-				if (db) {
-					try {
-						// Test if connection is still alive
-						await db.query("SELECT * FROM user LIMIT 1");
-						return db;
-					} catch (error) {
-						console.error(
-							"Connection is dead, resetting and reconnecting",
-							error,
-						);
-						// Connection is dead, reset and reconnect
-						db = null;
-					}
-				}
-
-				if (isConnecting && connectionPromise) {
-					return connectionPromise;
-				}
-
-				isConnecting = true;
-				connectionPromise = new Promise((resolve, reject) => {
-					const newDb = new Surreal();
-					newDb
-						.connect(config.address, {
-							namespace: config.ns,
-							database: config.db,
-							auth: {
-								username: config.username,
-								password: config.password,
-							},
-						})
-						.then(() => {
-							db = newDb;
-							isConnecting = false;
-							connectionPromise = null;
-							resolve(newDb);
-						})
-						.catch((error) => {
-							isConnecting = false;
-							connectionPromise = null;
-							reject(error);
-						});
-				});
-
-				return connectionPromise;
-			};
-
 			const { transformInput, transformOutput, convertWhereClause, getField } =
 				createTransform(options);
 
@@ -184,7 +132,6 @@ export const surrealAdapter =
 					model,
 					data,
 				}: { model: string; data: T }) => {
-					const db = await ensureConnection();
 					const transformed = transformInput(data, model, "create");
 					const [result] = await db.create(model, transformed);
 					return transformOutput(result, model) as R;
@@ -194,7 +141,6 @@ export const surrealAdapter =
 					where,
 					select = [],
 				}: { model: string; where: Where[]; select?: string[] }) => {
-					const db = await ensureConnection();
 					const whereClause = convertWhereClause(where, model);
 					const selectClause =
 						(select.length > 0 && select.map((f) => getField(model, f))) || [];
@@ -218,7 +164,6 @@ export const surrealAdapter =
 					limit?: number;
 					offset?: number;
 				}) => {
-					const db = await ensureConnection();
 					let query = `SELECT * FROM ${model}`;
 					if (where) {
 						const whereClause = convertWhereClause(where, model);
@@ -237,7 +182,6 @@ export const surrealAdapter =
 					return results.map((record) => transformOutput(record, model) as T);
 				},
 				count: async ({ model, where }: { model: string; where?: Where[] }) => {
-					const db = await ensureConnection();
 					const whereClause = where ? convertWhereClause(where, model) : "";
 					const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
 					const [result] = await db.query<[Record<string, unknown>[]]>(query);
@@ -249,7 +193,6 @@ export const surrealAdapter =
 					where,
 					update,
 				}: { model: string; where: Where[]; update: T }) => {
-					const db = await ensureConnection();
 					const whereClause = convertWhereClause(where, model);
 					const transformedUpdate = transformInput(update, model, "update");
 					const [result] = await db.query<[Record<string, unknown>[]]>(
@@ -261,7 +204,6 @@ export const surrealAdapter =
 					return transformOutput(result[0], model) as R;
 				},
 				delete: async ({ model, where }: { model: string; where: Where[] }) => {
-					const db = await ensureConnection();
 					const whereClause = convertWhereClause(where, model);
 					await db.query(`DELETE FROM ${model} WHERE ${whereClause}`);
 				},
@@ -269,7 +211,6 @@ export const surrealAdapter =
 					model,
 					where,
 				}: { model: string; where: Where[] }) => {
-					const db = await ensureConnection();
 					const whereClause = convertWhereClause(where, model);
 					const [result] = await db.query<[Record<string, unknown>[]]>(
 						`DELETE FROM ${model} WHERE ${whereClause}`,
@@ -281,7 +222,6 @@ export const surrealAdapter =
 					where,
 					update,
 				}: { model: string; where: Where[]; update: T }) => {
-					const db = await ensureConnection();
 					const whereClause = convertWhereClause(where, model);
 					const transformedUpdate = transformInput(update, model, "update");
 					const [result] = await db.query<[Record<string, unknown>[]]>(
