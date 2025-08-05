@@ -1,12 +1,17 @@
 {
   "name": "surrealdb-better-auth",
-  "version": "0.0.7",
+  "version": "0.1.0",
   "author": {
     "name": "Necmettin Karakaya",
     "url": "https://github.com/necmttn",
     "email": "necmettin.karakaya@gmail.com",
     "github": "https://github.com/necmttn"
   },
+  "contributors": [{
+    "name": "Dylan Vanmali",
+    "url": "https://github.com/dvanmali",
+    "github": "https://github.com/dvanmali"
+  }],
   "description": "Better Auth adapter for SurrealDB",
   "keywords": [
     "adapter",

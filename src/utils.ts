@@ -1,57 +1,52 @@
 import type { FieldAttribute } from "better-auth/db";
-import { StringRecordId } from "surrealdb";
+import type { Where } from "better-auth/types";
 
-function isDateString(dateString: string) {
-	const date = new Date(dateString);
-	return !isNaN(date.getTime());
+export const operatorMap: Record<Required<Where>['operator'], string | null> = {
+    "eq": "==",
+    "ne": "!=",
+    "lt": "<",
+    "lte": "<=",
+    "gt": ">",
+    "gte": ">=",
+    "contains": "CONTAINS",
+    "in": "IN",
+    // not operators but functions
+    "starts_with": null,
+    "ends_with": null,
 }
 
-function shouldConvertToRecordId(fieldName: string | undefined, model?: string): boolean {
-	if (!fieldName?.endsWith("Id")) {
-		return false;
-	}
-	
-	const excludedFields = ["providerId", "activeOrganizationId"];
-	if (excludedFields.includes(fieldName)) {
-		return false;
-	}
-	
-	// Special case: accountId should not be converted when model is "account"
-	if (fieldName === "accountId" && model === "account") {
-		return false;
-	}
-	
-	return true;
+export const typeMap: Record<string, string> = {
+    string: "string",
+    boolean: "bool",
+    number: "number",
+    date: "datetime",
+    "number[]": "array<number>",
+    "string[]": "array<string>",
+}
+
+function isDateString(dateString: string) {
+    const date = new Date(dateString);
+    return !isNaN(date.getTime());
 }
 
 export function withApplyDefault(
-	value: any,
-	field: FieldAttribute,
-	action: "create" | "update",
-	model?: string,
+    value: any,
+    field: FieldAttribute,
+    action: "create" | "update",
 ) {
-	switch (true) {
-		case action === "update":
-			return value;
-
-		case value === undefined || value === null:
-			if (field.defaultValue) {
-				return typeof field.defaultValue === "function"
-					? field.defaultValue()
-					: field.defaultValue;
-			}
-			return value;
-
-		case field.references?.model !== undefined:
-			return new StringRecordId(value);
-
-		case shouldConvertToRecordId(field.fieldName, model):
-			return new StringRecordId(value);
-
-		case typeof value === "string" && isDateString(value):
-			return new Date(value);
-
-		default:
-			return value;
-	}
+    if (action === "update") {
+        return value;
+    }
+    if (value === undefined || value === null) {
+        if (field.defaultValue) {
+            if (typeof field.defaultValue === "function") {
+                return field.defaultValue();
+            }
+            return field.defaultValue;
+        }
+    }
+    if (typeof value === 'string' && isDateString(value)) {
+        return new Date(value);
+    }
+    return value;
 }
