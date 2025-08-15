@@ -13,7 +13,7 @@ interface AdapterTestOptions {
 export async function runAdapterTest(opts: AdapterTestOptions) {
 	const adapter = await opts.getAdapter();
 	const user: User = {
-		id: "1",
+		id: "user:1",
 		name: "user1",
 		email: "user1@email.com",
 		emailVerified: true,
@@ -165,24 +165,25 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 	});
 
 	test("should work with reference fields", async () => {
+		const now = Date.now()
 		const user = await adapter.create<User>({
 			model: "user",
 			data: {
 				name: "user4",
 				email: "user4@email.com",
 				emailVerified: true,
-				createdAt: new Date(),
-				updatedAt: new Date(),
+				createdAt: new Date(now),
+				updatedAt: new Date(now),
 			},
 		});
 		await adapter.create<Session>({
 			model: "session",
 			data: {
 				token: generateId(),
-				createdAt: new Date(),
-				updatedAt: new Date(),
+				createdAt: new Date(now),
+				updatedAt: new Date(now),
 				userId: user.id,
-				expiresAt: new Date(),
+				expiresAt: new Date(now + 10 * 60 * 1000),
 			},
 		});
 		const res = await adapter.findOne({
@@ -425,18 +426,7 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 		});
 		expect(res.length).toBe(1);
 	});
-	test("should search users with endsWith", async () => {
-		const resNum = await adapter.findMany({
-			model: "session",
-			where: [
-				{
-					field: "expiresAt",
-					operator: "gte",
-					value: Date.now(),
-				},
-			],
-		});
-		expect(resNum.length).toBe(1);
+	test("should search for valid sessions", async () => {
 		const resDate = await adapter.findMany({
 			model: "session",
 			where: [

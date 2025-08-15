@@ -3,8 +3,8 @@ import { getAuthTables } from 'better-auth/db';
 import { createAdapter } from "better-auth/adapters";
 import type { CreateCustomAdapter } from "better-auth/adapters";
 import type { BetterAuthOptions, Where } from 'better-auth/types';
-import type { Surreal } from 'surrealdb';
-import { jsonify, RecordId, StringRecordId } from 'surrealdb';
+import type { RecordIdValue, Surreal } from 'surrealdb';
+import { RecordId, StringRecordId } from 'surrealdb';
 import { operatorMap, typeMap } from './utils';
 
 export interface SurrealBetterAuthConfig {
@@ -57,34 +57,58 @@ const createTransform = (options: BetterAuthOptions, config?: SurrealBetterAuthC
 
     return {
         convertWhereClause(where: Where[], model: string) {
-            return where.map((clause, index) => {
-                const { field: field, value, operator, connector } = clause;
-                const isRecordField =
-                    field === 'id'
-                    || value instanceof RecordId
-                    || (field.endsWith('Id') && config?.enableRecords)
+            const variables: Record<string, any> = {}
+            let whereClause = ''
+            for (let index=0; index < where.length; index++) {
+                const { field, operator, connector } = where[index];
+                let { value }: {value: Where['value'] | RecordId | StringRecordId | (string | number | RecordId | StringRecordId)[]} = where[index];
                 let str!: string
                 switch (operator) {
                     case "in":
-                        str = `${field} IN [${jsonify(value)}]`;
+                        str = `${field} IN $${model+field}`;
                         break;
                     case "starts_with":
-                        str = `string::starts_with(${field},'${value}')`;
+                        str = `string::starts_with(${field}, $${model+field})`;
                         break;
                     case "ends_with":
-                        str = `string::ends_with(${field},'${value}')`;
+                        str = `string::ends_with(${field}, $${model+field})`;
                         break;
                     default:
-                        str = isRecordField
-                            ? `${field} ${operatorMap[operator ?? "eq"]} ${jsonify(value)}`
-                            : `${field} ${operatorMap[operator ?? "eq"]} '${jsonify(value)}'`
+                        str = `${field} ${operatorMap[operator ?? "eq"]} $${model+field}`
                         break;
                 }
                 if (index < where.length - 1) {
                     str += ` ${connector ?? 'AND'} `
                 }
-                return str
-            }).join('');
+
+                // Convert field to RecordId
+                if (
+                    field === 'id'
+                    || (field.endsWith('Id') && config?.enableRecords)
+                ) {
+                    const toRecordId = (v: RecordIdValue) => {
+                        return typeof v === 'string' && v.match(/^[a-zA-Z]+:/)
+                            ? new StringRecordId(v)
+                            : new RecordId(model, v)
+                    }
+                    if (Array.isArray(value)) {
+                        value = value.map((v) => {
+                            return typeof v === 'string' || typeof v === 'number'
+                                ? toRecordId(v)
+                                : v
+                        })
+                    } else if (typeof value === 'string' || typeof value === 'number') {
+                        value = toRecordId(value)
+                    }
+                }
+
+                variables[model+field] = value
+                whereClause += str
+            }
+            return {
+                whereClause,
+                variables,
+            }
         },
         getField,
     };
@@ -114,7 +138,7 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                 }
                 return data
             },
-            customTransformOutput: ({ field, data }) => {
+            customTransformOutput: ({ data }) => {
                 // Convert RecordId to String
                 if (data instanceof RecordId) {
                     data = data.toString()
@@ -137,27 +161,29 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     // Search by id
                     if (idWhereIndex >= 0) {
                         const [id] = where.splice(idWhereIndex, 1)
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = select.length > 0
                             ? `SELECT ${selectClause.join(', ')} FROM ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''}`
                             : `SELECT * FROM ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''}`;
-                        const [result] = await db.query<[any]>(query)
+                        const [result] = await db.query<[any]>(query, variables)
                         return typeof result === 'object' ? result : null
                     }
                     // Search by where
                     else {
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = select.length > 0
                             ? `SELECT ${selectClause.join(', ')} FROM ${model} WHERE ${whereClause} LIMIT 1`
                             : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
-                        const [result] = await db.query<[any[]]>(query)
+                        const [result] = await db.query<[any[]]>(query, variables)
                         return result[0];
                     }
                 },
                 findMany: async ({ model, where, sortBy, limit, offset }) => {
                     let query = `SELECT * FROM ${model}`;
+                    let variables: Record<string, any> | undefined
                     if (where) {
-                        const whereClause = convertWhereClause(where, model);
+                        const {whereClause, variables: _variables} = convertWhereClause(where, model);
+                        variables = _variables
                         query += ` WHERE ${whereClause}`;
                     }
                     if (sortBy) {
@@ -169,13 +195,13 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     if (offset !== undefined) {
                         query += ` START ${offset}`;
                     }
-                    const [results] = await db.query<[any[]]>(query);
+                    const [results] = await db.query<[any[]]>(query, variables);
                     return results;
                 },
                 count: async ({ model, where }) => {
-                    const whereClause = where ? convertWhereClause(where, model) : '';
+                    const { whereClause, variables } = where ? convertWhereClause(where, model) : {};
                     const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
-                    const [result] = await db.query<[any[]]>(query);
+                    const [result] = await db.query<[any[]]>(query, variables);
                     const res = result[0];
                     return res.count;
                 },
@@ -183,16 +209,18 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     const idWhereIndex = where.findIndex((val) => val.field === "id")
                     if (idWhereIndex > 0) {
                         const [id] = where.splice(idWhereIndex, 1)
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = `UPDATE ONLY ${id.value} MERGE $update ${whereClause.length ? `WHERE ${whereClause}` : ''}`
                         const [result] = await db.query<[any]>(query, {
+                            ...variables,
                             update,
                         })
                         return typeof result === 'object' ? result : null
                     } else {
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = `UPDATE ${model} MERGE $update WHERE ${whereClause}`
                         const [result] = await db.query<[any[]]>(query, {
+                            ...variables,
                             update,
                         });
                         return result[0];
@@ -202,23 +230,23 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     const idWhereIndex = where.findIndex((val) => val.field === "id")
                     if (idWhereIndex > 0) {
                         const [id] = where.splice(idWhereIndex, 1)
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = `DELETE ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''} RETURN BEFORE`
-                        await db.query<[any]>(query)
+                        await db.query<[any]>(query, variables)
                     } else {
-                        const whereClause = convertWhereClause(where, model);
+                        const { whereClause, variables } = convertWhereClause(where, model);
                         const query = `DELETE ${model} WHERE ${whereClause} RETURN NONE`
-                        await db.query<[any[]]>(query);
+                        await db.query<[any[]]>(query, variables);
                     }
                 },
                 deleteMany: async ({ model, where }) => {
-                    const whereClause = convertWhereClause(where, model);
-                    const [result] = await db.query<[any[]]>(`DELETE FROM ${model} WHERE ${whereClause} RETURN BEFORE`);
+                    const { whereClause, variables } = convertWhereClause(where, model);
+                    const [result] = await db.query<[any[]]>(`DELETE FROM ${model} WHERE ${whereClause} RETURN BEFORE`, variables);
                     return result.length;
                 },
                 updateMany: async ({ model, where, update }) => {
-                    const whereClause = convertWhereClause(where, model);
-                    const [result] = await db.query<[any[]]>(`UPDATE ${model} MERGE ${JSON.stringify(update)} WHERE ${whereClause}`);
+                    const { whereClause, variables } = convertWhereClause(where, model);
+                    const [result] = await db.query<[any[]]>(`UPDATE ${model} MERGE ${JSON.stringify(update)} WHERE ${whereClause}`, variables);
                     return result[0];
                 },
                 createSchema: async ({ file, tables }) => {

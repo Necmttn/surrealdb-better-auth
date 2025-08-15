@@ -1,4 +1,5 @@
 node_modules
 bun.lockb
+bun.lock
 .DS_Store
 sst-env.d.ts
