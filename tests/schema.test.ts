@@ -251,7 +251,7 @@ describe.each([
   });
   const { adapter, opts } = getTestSchemaAdapter(db, {
     generate: {
-      roundDefaultTime: roundDefaultTime as 's' | 'ms' | false | undefined,
+      roundAtTimes: roundDefaultTime as 's' | 'ms' | false | undefined,
     }
   });
 

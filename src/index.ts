@@ -36,11 +36,11 @@ export interface SurrealBetterAuthConfig {
 		 */
 		disableOnDeleteReference?: boolean
 		/**
-		 * Rounds default times using time::
+		 * Rounds default times using time::round
 		 * 
 		 * @default 's' - seconds
 		 */
-		roundDefaultTime?: 's' | 'ms' | false
+		roundAtTimes?: 's' | 'ms' | false
 	}
 }
 
@@ -227,9 +227,9 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     }
                     let code = ''
                     const overwrite = config?.generate?.overwrite ? "OVERWRITE " : ""
-                    const defaultTimeNow = config?.generate?.roundDefaultTime === false
+                    const defaultTimeNow = config?.generate?.roundAtTimes === false
                         ? `time::now()`
-                        : `time::round(time::now(), 1${config?.generate?.roundDefaultTime ?? 's'})`
+                        : `time::round(time::now(), 1${config?.generate?.roundAtTimes ?? 's'})`
 
                     for (const [tablekey, table] of Object.entries(tables)) {
                         const tableName = table.modelName ?? tablekey
@@ -254,16 +254,19 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                                 type = `option<${type}>`
                             }
 
-                            let fieldDefault = typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
+                            const fieldDefault = typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
                             let defaultStr: string | undefined = undefined
-                            if (fieldDefault !== undefined) {
-                                if (fieldkey?.endsWith('At')) {
-                                    fieldDefault = defaultTimeNow
-                                    defaultStr = fieldDefault ? ` VALUE ${fieldDefault}${
-                                        fieldkey === 'createdAt' ? " READONLY" : ""
-                                    }` : ""
+                            if (!(fieldDefault === undefined || fieldDefault === null)) {
+                                if (fieldkey === "createdAt") {
+                                    defaultStr = ` VALUE ${defaultTimeNow} READONLY`
+                                } else if (fieldkey === "updatedAt") {
+                                    defaultStr = ` VALUE ${defaultTimeNow}`
+                                } else if (fieldkey?.endsWith('At')) {
+                                    const roundAtTimes = config?.generate?.roundAtTimes
+                                    const valueRounded = roundAtTimes !== false ? `time::round($value, 1${roundAtTimes ?? 's'})` : ""
+                                    defaultStr = valueRounded.length ? ` VALUE ${valueRounded}` : ""
                                 } else {
-                                    defaultStr = fieldDefault !== undefined ? ` DEFAULT ${fieldDefault}` : ""
+                                    defaultStr = ` DEFAULT ${fieldDefault}`
                                 }
                             }
 
