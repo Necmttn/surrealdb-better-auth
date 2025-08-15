@@ -425,4 +425,28 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 		});
 		expect(res.length).toBe(1);
 	});
+	test("should search users with endsWith", async () => {
+		const resNum = await adapter.findMany({
+			model: "session",
+			where: [
+				{
+					field: "expiresAt",
+					operator: "gte",
+					value: Date.now(),
+				},
+			],
+		});
+		expect(resNum.length).toBe(1);
+		const resDate = await adapter.findMany({
+			model: "session",
+			where: [
+				{
+					field: "expiresAt",
+					operator: "gte",
+					value: new Date(),
+				},
+			],
+		});
+		expect(resDate.length).toBe(1);
+	});
 }
