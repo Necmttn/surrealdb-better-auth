@@ -1,29 +1,28 @@
 // Based on packages/better-auth/src/adapters/test.ts
 
-import { generateId } from "better-auth";
+import { generateId, Session } from "better-auth";
 import type { Adapter, BetterAuthOptions, User } from "better-auth/types";
 import { expect, test } from "bun:test";
-import { RecordId } from "surrealdb";
+
 interface AdapterTestOptions {
 	getAdapter: (
 		customOptions?: Omit<BetterAuthOptions, "database">,
-	) => Promise<Adapter>;
-	skipGenerateIdTest?: boolean;
+	) => Promise<Adapter>
 }
 
 export async function runAdapterTest(opts: AdapterTestOptions) {
 	const adapter = await opts.getAdapter();
-	const user = {
-		id: "1",
-		name: "user",
-		email: "user@email.com",
+	const user: User = {
+		id: "user:1",
+		name: "user1",
+		email: "user1@email.com",
 		emailVerified: true,
 		createdAt: new Date(),
 		updatedAt: new Date(),
 	};
 
 	test("create model", async () => {
-		const res = await adapter.create({
+		const res = await adapter.create<User>({
 			model: "user",
 			data: user,
 		});
@@ -122,7 +121,6 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 		const user = await adapter.create<User>({
 			model: "user",
 			data: {
-				id: "2",
 				name: "user2",
 				email: "test@email.com",
 				emailVerified: true,
@@ -146,9 +144,8 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 		const newUser = await adapter.create<User>({
 			model: "user",
 			data: {
-				id: "3",
-				name: "user",
-				email: "test-email2@email.com",
+				name: "user3",
+				email: "user3@email.com",
 				emailVerified: true,
 				createdAt: new Date(),
 				updatedAt: new Date(),
@@ -168,26 +165,25 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 	});
 
 	test("should work with reference fields", async () => {
-		const user = await adapter.create<{ id: string } & Record<string, any>>({
+		const now = Date.now()
+		const user = await adapter.create<User>({
 			model: "user",
 			data: {
-				id: "4",
-				name: "user",
-				email: "my-email@email.com",
+				name: "user4",
+				email: "user4@email.com",
 				emailVerified: true,
-				createdAt: new Date(),
-				updatedAt: new Date(),
+				createdAt: new Date(now),
+				updatedAt: new Date(now),
 			},
 		});
-		await adapter.create({
+		await adapter.create<Session>({
 			model: "session",
 			data: {
-				id: "1",
 				token: generateId(),
-				createdAt: new Date(),
-				updatedAt: new Date(),
+				createdAt: new Date(now),
+				updatedAt: new Date(now),
 				userId: user.id,
-				expiresAt: new Date(),
+				expiresAt: new Date(now + 10 * 60 * 1000),
 			},
 		});
 		const res = await adapter.findOne({
@@ -205,10 +201,9 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 	});
 
 	test("should find many with sortBy", async () => {
-		await adapter.create({
+		await adapter.create<User>({
 			model: "user",
 			data: {
-				id: "5",
 				name: "a",
 				email: "a@email.com",
 				emailVerified: true,
@@ -307,11 +302,10 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 	});
 
 	test("should delete many", async () => {
-		for (const id of ["to-be-delete1", "to-be-delete2", "to-be-delete3"]) {
-			await adapter.create({
+		for (const id of [1,2,3]) {
+			await adapter.create<User>({
 				model: "user",
 				data: {
-					id,
 					name: "to-be-deleted",
 					email: `email@test-${id}.com`,
 					emailVerified: true,
@@ -330,7 +324,7 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 			],
 		});
 		expect(findResFirst.length).toBe(3);
-		await adapter.deleteMany({
+		const deleted = await adapter.deleteMany({
 			model: "user",
 			where: [
 				{
@@ -339,6 +333,7 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 				},
 			],
 		});
+		expect(deleted).toBe(findResFirst.length)
 		const findRes = await adapter.findMany({
 			model: "user",
 			where: [
@@ -431,29 +426,17 @@ export async function runAdapterTest(opts: AdapterTestOptions) {
 		});
 		expect(res.length).toBe(1);
 	});
-
-	test.skipIf(opts.skipGenerateIdTest || false)(
-		"should prefer generateId if provided",
-		async () => {
-			const customAdapter = await opts.getAdapter({
-				advanced: {
-					generateId: () => 'mocked-id',
+	test("should search for valid sessions", async () => {
+		const resDate = await adapter.findMany({
+			model: "session",
+			where: [
+				{
+					field: "expiresAt",
+					operator: "gte",
+					value: new Date(),
 				},
-			});
-
-			const res = await customAdapter.create({
-				model: "user",
-				data: {
-					id: "1",
-					name: "user4",
-					email: "user4@email.com",
-					emailVerified: true,
-					createdAt: new Date(),
-					updatedAt: new Date(),
-				},
-			});
-			expect(res.id).toBeInstanceOf(RecordId);
-			expect((res.id as unknown as RecordId).id).toBe('mocked-id');
-		},
-	);
+			],
+		});
+		expect(resDate.length).toBe(1);
+	});
 }

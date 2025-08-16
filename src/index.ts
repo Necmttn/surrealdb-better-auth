@@ -1,296 +1,339 @@
-import { generateId } from "better-auth";
-import { getAuthTables } from "better-auth/db";
-import type { Adapter, BetterAuthOptions, Where } from "better-auth/types";
-import { jsonify, type RecordId } from "surrealdb";
-import { Surreal } from "surrealdb";
-import { withApplyDefault } from "./utils";
+import type { FieldType} from 'better-auth/db';
+import { getAuthTables } from 'better-auth/db';
+import { createAdapter } from "better-auth/adapters";
+import type { CreateCustomAdapter } from "better-auth/adapters";
+import type { BetterAuthOptions, Where } from 'better-auth/types';
+import type { RecordIdValue, Surreal } from 'surrealdb';
+import { RecordId, StringRecordId } from 'surrealdb';
+import { operatorMap, typeMap } from './utils';
 
-interface SurrealConfig {
-	address: string;
-	username: string;
-	password: string;
-	ns: string;
-	db: string;
+export interface SurrealBetterAuthConfig {
+    /**
+     * Enable fields with record type. Otherwise, field type is string.
+     *
+     * Utilizing this may require you to convert string fields
+     * to record types beforehand as `generate` does not perform
+     * this conversion for you.
+     *
+     * @default false
+     */
+    enableRecords?: boolean
+    /**
+     * Settings pertaining to schema creation and likewise
+     * the better-auth cli `generate` function
+     */
+	generate?: {
+		/**
+		 * Add the overwrite clause on all statements
+		 */
+		overwrite?: boolean
+		/**
+		 * Disables "ON DELETE" record references functionality
+		 * such as when surreal<=v2. Only valid when
+         * enableRecords is true.
+		 *
+		 * @default false
+		 */
+		disableOnDeleteReference?: boolean
+		/**
+		 * Rounds default times using time::round
+		 * 
+		 * @default 's' - seconds
+		 */
+		roundAtTimes?: 's' | 'ms' | false
+	}
 }
 
-const createTransform = (options: BetterAuthOptions) => {
-	const schema = getAuthTables(options);
+const createTransform = (options: BetterAuthOptions, config?: SurrealBetterAuthConfig) => {
+    const schema = getAuthTables(options);
 
-	function transformSelect(select: string[], model: string): string[] {
-		if (!select || select.length === 0) return [];
-		return select.map((field) => getField(model, field));
-	}
+    function getField(model: string, field: string) {
+        if (field === "id") {
+            return field;
+        }
+        const f = schema[model].fields[field];
+        return f.fieldName || field;
+    }
 
-	function getField(model: string, field: string) {
-		if (field === "id") {
-			return field;
-		}
-		const f = schema[model].fields[field];
-		return f.fieldName || field;
-	}
+    return {
+        convertWhereClause(where: Where[], model: string) {
+            const variables: Record<string, any> = {}
+            let whereClause = ''
+            for (let index=0; index < where.length; index++) {
+                const { field, operator, connector } = where[index];
+                let { value }: {value: Where['value'] | RecordId | StringRecordId | (string | number | RecordId | StringRecordId)[]} = where[index];
+                let str!: string
+                switch (operator) {
+                    case "in":
+                        str = `${field} IN $${model+field}`;
+                        break;
+                    case "starts_with":
+                        str = `string::starts_with(${field}, $${model+field})`;
+                        break;
+                    case "ends_with":
+                        str = `string::ends_with(${field}, $${model+field})`;
+                        break;
+                    default:
+                        str = `${field} ${operatorMap[operator ?? "eq"]} $${model+field}`
+                        break;
+                }
+                if (index < where.length - 1) {
+                    str += ` ${connector ?? 'AND'} `
+                }
 
-	return {
-		transformInput<T extends Record<string, unknown>>(
-			data: T,
-			model: string,
-			action: "update" | "create",
-		) {
-			const transformedData: Record<string, unknown> =
-				action === "update"
-					? {}
-					: {
-						id: options.advanced?.generateId
-							? options.advanced.generateId({ model })
-							: data.id || generateId(),
-					};
+                // Convert field to RecordId
+                if (
+                    field === 'id'
+                    || (field.endsWith('Id') && config?.enableRecords)
+                ) {
+                    const toRecordId = (v: RecordIdValue) => {
+                        return typeof v === 'string' && v.match(/^[a-zA-Z]+:/)
+                            ? new StringRecordId(v)
+                            : new RecordId(model, v)
+                    }
+                    if (Array.isArray(value)) {
+                        value = value.map((v) => {
+                            return typeof v === 'string' || typeof v === 'number'
+                                ? toRecordId(v)
+                                : v
+                        })
+                    } else if (typeof value === 'string' || typeof value === 'number') {
+                        value = toRecordId(value)
+                    }
+                }
 
-			const fields = schema[model].fields;
-			for (const field in fields) {
-				const value = data[field];
-				if (value === undefined && !fields[field].defaultValue) {
-					continue;
-				}
-				transformedData[fields[field].fieldName || field] = withApplyDefault(
-					value,
-					{
-						...fields[field],
-						fieldName: fields[field].fieldName || field,
-					},
-					action,
-					model,
-				);
-			}
-			return transformedData;
-		},
-		transformOutput<T extends Record<string, unknown>>(
-			data: T,
-			model: string,
-			select: string[] = [],
-		) {
-			if (!data) return null;
-			const transformedData: Record<string, unknown> =
-				data.id || data._id
-					? select.length === 0 || select.includes("id")
-						? { id: jsonify(data.id) }
-						: {}
-					: {};
-			const tableSchema = schema[model].fields;
-			for (const key in tableSchema) {
-				if (select.length && !select.includes(key)) {
-					continue;
-				}
-				const field = tableSchema[key];
-				if (field) {
-					transformedData[key] = jsonify(data[field.fieldName || key]);
-				}
-			}
-			return transformedData as T;
-		},
-		convertWhereClause(where: Where[], model: string) {
-			return where
-				.map((clause) => {
-					const { field: _field, value, operator } = clause;
-					const field = getField(model, _field);
-					const v = value as unknown as RecordId;
-					const isRecordId = !!v.tb;
-					switch (operator) {
-						case "eq":
-							return field === "id" || isRecordId
-								? `${field} = ${jsonify(value)}`
-								: `${field} = '${jsonify(value)}'`;
-						case "in":
-							return `${field} IN [${jsonify(value)}]`;
-						case "contains":
-							return `${field} CONTAINS '${jsonify(value)}'`;
-						case "starts_with":
-							return `string::starts_with(${field},'${value}')`;
-						case "ends_with":
-							return `string::ends_with(${field},'${value}')`;
-						default:
-							if (field.endsWith("Id") || isRecordId || field === "id") {
-								return `${field} = ${jsonify(value)}`;
-							}
-							return `${field} = '${jsonify(value)}'`;
-					}
-				})
-				.join(" AND ");
-		},
-		transformSelect,
-		getField,
-	};
+                variables[model+field] = value
+                whereClause += str
+            }
+            return {
+                whereClause,
+                variables,
+            }
+        },
+        getField,
+    };
 };
 
-export const surrealAdapter =
-	(config: SurrealConfig) =>
-		(options: BetterAuthOptions): Adapter => {
-			let db: Surreal | null = null;
-			let isConnecting = false;
-			let connectionPromise: Promise<Surreal> | null = null;
+export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) => {
+    if (!db) {
+        throw new Error("SurrealDB adapter requires a SurrealDB client");
+    }
 
-			const ensureConnection = async () => {
-				if (db) {
-					try {
-						// Test if connection is still alive
-						await db.query("SELECT * FROM user LIMIT 1");
-						return db;
-					} catch (error) {
-						console.error(
-							"Connection is dead, resetting and reconnecting",
-							error,
-						);
-						// Connection is dead, reset and reconnect
-						db = null;
-					}
-				}
+    return createAdapter({
+        config: {
+            adapterId: "surreal",
+            supportsBooleans: true,
+            supportsJSON: true,
+            supportsDates: true,
+            supportsNumericIds: true,
+            disableIdGeneration: true,
+            customTransformInput: ({ field, data }) => {
+                // Attempt to transform a string to a RecordId
+                if (
+                    config?.enableRecords
+                    && (field === 'id' || field.endsWith('Id'))
+                    && typeof data === 'string'
+                ) {
+                    data = new StringRecordId(data)
+                }
+                return data
+            },
+            customTransformOutput: ({ data }) => {
+                // Convert RecordId to String
+                if (data instanceof RecordId) {
+                    data = data.toString()
+                }
+                return data
+            }
+        },
+        adapter: ({ options }) => {
+            const { convertWhereClause, getField } = createTransform(options, config);
 
-				if (isConnecting && connectionPromise) {
-					return connectionPromise;
-				}
+            return {
+                create: async ({ model, data }) => {
+                    const [result] = await db.create<any>(model, data);
+                    return result;
+                },
+                findOne: async ({ model, where, select = [] }) => {
+                    const idWhereIndex = where.findIndex((val) => val.field === "id")
+                    const selectClause = select.length > 0 && select.map((f) => getField(model, f)) || []
 
-				isConnecting = true;
-				connectionPromise = new Promise((resolve, reject) => {
-					const newDb = new Surreal();
-					newDb
-						.connect(config.address, {
-							namespace: config.ns,
-							database: config.db,
-							auth: {
-								username: config.username,
-								password: config.password,
-							},
-						})
-						.then(() => {
-							db = newDb;
-							isConnecting = false;
-							connectionPromise = null;
-							resolve(newDb);
-						})
-						.catch((error) => {
-							isConnecting = false;
-							connectionPromise = null;
-							reject(error);
-						});
-				});
+                    // Search by id
+                    if (idWhereIndex >= 0) {
+                        const [id] = where.splice(idWhereIndex, 1)
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = select.length > 0
+                            ? `SELECT ${selectClause.join(', ')} FROM ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''}`
+                            : `SELECT * FROM ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''}`;
+                        const [result] = await db.query<[any]>(query, variables)
+                        return typeof result === 'object' ? result : null
+                    }
+                    // Search by where
+                    else {
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = select.length > 0
+                            ? `SELECT ${selectClause.join(', ')} FROM ${model} WHERE ${whereClause} LIMIT 1`
+                            : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
+                        const [result] = await db.query<[any[]]>(query, variables)
+                        return result[0];
+                    }
+                },
+                findMany: async ({ model, where, sortBy, limit, offset }) => {
+                    let query = `SELECT * FROM ${model}`;
+                    let variables: Record<string, any> | undefined
+                    if (where) {
+                        const {whereClause, variables: _variables} = convertWhereClause(where, model);
+                        variables = _variables
+                        query += ` WHERE ${whereClause}`;
+                    }
+                    if (sortBy) {
+                        query += ` ORDER BY ${getField(model, sortBy.field)} ${sortBy.direction}`;
+                    }
+                    if (limit !== undefined) {
+                        query += ` LIMIT ${limit}`;
+                    }
+                    if (offset !== undefined) {
+                        query += ` START ${offset}`;
+                    }
+                    const [results] = await db.query<[any[]]>(query, variables);
+                    return results;
+                },
+                count: async ({ model, where }) => {
+                    const { whereClause, variables } = where ? convertWhereClause(where, model) : {};
+                    const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
+                    const [result] = await db.query<[any[]]>(query, variables);
+                    const res = result[0];
+                    return res.count;
+                },
+                update: async ({ model, where, update }) => {
+                    const idWhereIndex = where.findIndex((val) => val.field === "id")
+                    if (idWhereIndex > 0) {
+                        const [id] = where.splice(idWhereIndex, 1)
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = `UPDATE ONLY ${id.value} MERGE $update ${whereClause.length ? `WHERE ${whereClause}` : ''}`
+                        const [result] = await db.query<[any]>(query, {
+                            ...variables,
+                            update,
+                        })
+                        return typeof result === 'object' ? result : null
+                    } else {
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = `UPDATE ${model} MERGE $update WHERE ${whereClause}`
+                        const [result] = await db.query<[any[]]>(query, {
+                            ...variables,
+                            update,
+                        });
+                        return result[0];
+                    }
+				},
+                delete: async ({ model, where }) => {
+                    const idWhereIndex = where.findIndex((val) => val.field === "id")
+                    if (idWhereIndex > 0) {
+                        const [id] = where.splice(idWhereIndex, 1)
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = `DELETE ONLY ${id.value} ${whereClause.length ? `WHERE ${whereClause}` : ''} RETURN BEFORE`
+                        await db.query<[any]>(query, variables)
+                    } else {
+                        const { whereClause, variables } = convertWhereClause(where, model);
+                        const query = `DELETE ${model} WHERE ${whereClause} RETURN NONE`
+                        await db.query<[any[]]>(query, variables);
+                    }
+                },
+                deleteMany: async ({ model, where }) => {
+                    const { whereClause, variables } = convertWhereClause(where, model);
+                    const [result] = await db.query<[any[]]>(`DELETE FROM ${model} WHERE ${whereClause} RETURN BEFORE`, variables);
+                    return result.length;
+                },
+                updateMany: async ({ model, where, update }) => {
+                    const { whereClause, variables } = convertWhereClause(where, model);
+                    const [result] = await db.query<[any[]]>(`UPDATE ${model} MERGE ${JSON.stringify(update)} WHERE ${whereClause}`, variables);
+                    return result[0];
+                },
+                createSchema: async ({ file, tables }) => {
+                    if (file && !file?.endsWith('.surql')) {
+                        throw Error("output file type must be .surql")
+                    }
+                    let code = ''
+                    const overwrite = config?.generate?.overwrite ? "OVERWRITE " : ""
+                    const defaultTimeNow = config?.generate?.roundAtTimes === false
+                        ? `time::now()`
+                        : `time::round(time::now(), 1${config?.generate?.roundAtTimes ?? 's'})`
 
-				return connectionPromise;
-			};
+                    for (const [tablekey, table] of Object.entries(tables)) {
+                        const tableName = table.modelName ?? tablekey
+                        code += `DEFINE TABLE ${overwrite}${tableName} SCHEMAFULL;\n`
 
-			const { transformInput, transformOutput, convertWhereClause, getField } =
-				createTransform(options);
+                        for (const [fieldkey, field] of Object.entries(table.fields)) {
+                            const fieldName = field.fieldName ?? fieldkey
+                            const typeKey = Array.isArray(field.type) ? `${field.type[0]}[]` as FieldType : field.type;
+                            let type = typeMap[typeKey as string] ?? "any"
 
-			return {
-				id: "surreal",
-				create: async <T extends Record<string, unknown>, R = T>({
-					model,
-					data,
-				}: { model: string; data: T }) => {
-					const db = await ensureConnection();
-					const transformed = transformInput(data, model, "create");
-					const [result] = await db.create(model, transformed);
-					return transformOutput(result, model) as R;
-				},
-				findOne: async <T>({
-					model,
-					where,
-					select = [],
-				}: { model: string; where: Where[]; select?: string[] }) => {
-					const db = await ensureConnection();
-					const whereClause = convertWhereClause(where, model);
-					const selectClause =
-						(select.length > 0 && select.map((f) => getField(model, f))) || [];
-					const query =
-						select.length > 0
-							? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
-							: `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
-					const result = await db.query<[Record<string, unknown>[]]>(query);
-					return transformOutput(result[0][0], model, select) as T | null;
-				},
-				findMany: async <T>({
-					model,
-					where,
-					sortBy,
-					limit,
-					offset,
-				}: {
-					model: string;
-					where?: Where[];
-					sortBy?: { field: string; direction: "asc" | "desc" };
-					limit?: number;
-					offset?: number;
-				}) => {
-					const db = await ensureConnection();
-					let query = `SELECT * FROM ${model}`;
-					if (where) {
-						const whereClause = convertWhereClause(where, model);
-						query += ` WHERE ${whereClause}`;
-					}
-					if (sortBy) {
-						query += ` ORDER BY ${getField(model, sortBy.field)} ${sortBy.direction}`;
-					}
-					if (limit !== undefined) {
-						query += ` LIMIT ${limit}`;
-					}
-					if (offset !== undefined) {
-						query += ` START ${offset}`;
-					}
-					const [results] = await db.query<[Record<string, unknown>[]]>(query);
-					return results.map((record) => transformOutput(record, model) as T);
-				},
-				count: async ({ model, where }: { model: string; where?: Where[] }) => {
-					const db = await ensureConnection();
-					const whereClause = where ? convertWhereClause(where, model) : "";
-					const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
-					const [result] = await db.query<[Record<string, unknown>[]]>(query);
-					const res = result[0];
-					return Number(res.count);
-				},
-				update: async <T extends Record<string, unknown>, R = T>({
-					model,
-					where,
-					update,
-				}: { model: string; where: Where[]; update: T }) => {
-					const db = await ensureConnection();
-					const whereClause = convertWhereClause(where, model);
-					const transformedUpdate = transformInput(update, model, "update");
-					const [result] = await db.query<[Record<string, unknown>[]]>(
-						`UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-						{
-							transformedUpdate,
-						},
-					);
-					return transformOutput(result[0], model) as R;
-				},
-				delete: async ({ model, where }: { model: string; where: Where[] }) => {
-					const db = await ensureConnection();
-					const whereClause = convertWhereClause(where, model);
-					await db.query(`DELETE FROM ${model} WHERE ${whereClause}`);
-				},
-				deleteMany: async ({
-					model,
-					where,
-				}: { model: string; where: Where[] }) => {
-					const db = await ensureConnection();
-					const whereClause = convertWhereClause(where, model);
-					const [result] = await db.query<[Record<string, unknown>[]]>(
-						`DELETE FROM ${model} WHERE ${whereClause}`,
-					);
-					return result.length;
-				},
-				updateMany: async <T extends Record<string, unknown>, R = T>({
-					model,
-					where,
-					update,
-				}: { model: string; where: Where[]; update: T }) => {
-					const db = await ensureConnection();
-					const whereClause = convertWhereClause(where, model);
-					const transformedUpdate = transformInput(update, model, "update");
-					const [result] = await db.query<[Record<string, unknown>[]]>(
-						`UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-						{
-							transformedUpdate,
-						},
-					);
-					return transformOutput(result[0], model) as R;
-				},
-			} satisfies Adapter;
-		};
+                            if (
+                                config?.enableRecords
+                                && field.references
+                                && field.references.field === 'id'
+                            ) {
+                                type = (typeKey as string).endsWith("[]")
+                                    ? `record<array<${field.references.model}>>`
+                                    : `record<${field.references.model}>`
+                            }
+
+                            if (!field.required && type !== "any") {
+                                type = `option<${type}>`
+                            }
+
+                            const fieldDefault = typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
+                            let defaultStr: string | undefined = undefined
+                            if (!(fieldDefault === undefined || fieldDefault === null)) {
+                                if (fieldkey === "createdAt") {
+                                    defaultStr = ` VALUE ${defaultTimeNow} READONLY`
+                                } else if (fieldkey === "updatedAt") {
+                                    defaultStr = ` VALUE ${defaultTimeNow}`
+                                } else if (fieldkey?.endsWith('At')) {
+                                    const roundAtTimes = config?.generate?.roundAtTimes
+                                    const valueRounded = roundAtTimes !== false ? `time::round($value, 1${roundAtTimes ?? 's'})` : ""
+                                    defaultStr = valueRounded.length ? ` VALUE ${valueRounded}` : ""
+                                } else {
+                                    defaultStr = ` DEFAULT ${fieldDefault}`
+                                }
+                            }
+
+                            if (
+                                config?.enableRecords
+                                && field.references?.onDelete
+                                && !config?.generate?.disableOnDeleteReference
+                            ) {
+                                switch (field.references.onDelete) {
+                                    case 'set null':
+                                        type += ` REFERENCE ON DELETE UNSET`
+                                        break;
+                                    case 'no action':
+                                        type += ` REFERENCE ON DELETE IGNORE`
+                                        break;
+                                    case 'restrict':
+                                        type += ` REFERENCE ON DELETE REJECT`
+                                        break;
+                                    case 'set default':
+                                        type += ` REFERENCE ON DELETE THEN $value = ${fieldDefault}`
+                                        break;
+                                    case 'cascade':
+                                    default:
+                                        type += ` REFERENCE ON DELETE CASCADE`
+                                        break;
+                                }
+                            }
+
+                            code += `DEFINE FIELD ${overwrite}${fieldName} ON TABLE ${tableName} TYPE ${type}${defaultStr ?? ""};\n`
+                        }
+
+                        code += `\n`
+                    }
+                    return {
+                        code,
+                        path: file ?? 'auth.surql',
+                    }
+                },
+            } satisfies ReturnType<CreateCustomAdapter>
+        },
+    })
+};

@@ -43,123 +43,68 @@ yarn add surrealdb-better-auth
 
 ```typescript
 import { surrealAdapter } from "surrealdb-better-auth";
+import { Surreal } from 'surrealdb'
+
+const surrealdb = new Surreal()
+surrealdb.connect(
+	process.env.SURREALDB_ADDRESS ?? "http://localhost:8000", {
+	namespace: process.env.SURREALDB_NAMESPACE ?? "namespace",
+	database: process.env.SURREALDB_DATABASE ?? "database",
+	auth: {
+		username: process.env.SURREALDB_AUTH_USERNAME ?? "root",
+		password: process.env.SURREALDB_AUTH_PASSWORD ??"root",
+	},
+	reconnect: true,
+})
 
 export const auth = betterAuth({
 	// ... other Better Auth options
-	database: surrealAdapter({
-		address: "http://localhost:8000", // Your SurrealDB server address
-		username: "root", // Your SurrealDB username
-		password: "root", // Your SurrealDB password
-		ns: "namespace", // Your namespace
-		db: "database", // Your database name
-	}),
+	database: surrealAdapter(surrealdb),
 });
 ```
 
-### Environment Variables Setup
+### Records Enabled Setup
+
+When enabling records, all fields ending with 'Id' will be treated as a SurrealDb RecordId. You may need to inspect some plugins to ensure that they do not use this pattern. The following updates the reserved schemas.
 
 ```typescript
-import { surrealAdapter } from "surrealdb-better-auth";
-
 export const auth = betterAuth({
-	// ... other Better Auth options
-	database: surrealAdapter({
-		address: process.env.SURREALDB_ADDRESS,
-		username: process.env.SURREALDB_USERNAME,
-		password: process.env.SURREALDB_PASSWORD,
-		ns: process.env.SURREALDB_NAMESPACE,
-		db: process.env.SURREALDB_DATABASE,
+	database: surrealAdapter(surrealdb, {
+		enableRecords: true,
 	}),
+	account: {
+		fields: {
+			accountId: "subject", // renames 'accountId' to 'subject'
+			providerId: "name",		// renames 'providerId' to 'name'
+		},
+	},
 });
 ```
 
-## 📋 Schema Definitions
+## 📋 Schema Generation
 
-### Default Schemas
+You can automatically run to generate a schema based on your configuration to a Surql file.
 
-#### Account Table
-
-```sql
-DEFINE TABLE account TYPE ANY SCHEMALESS COMMENT 'better-auth: accounts' PERMISSIONS NONE;
-DEFINE FIELD accountId ON account TYPE record<user> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD createdAt ON account TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD id ON account TYPE string PERMISSIONS FULL;
-DEFINE FIELD password ON account TYPE string PERMISSIONS FULL;
-DEFINE FIELD providerId ON account TYPE string PERMISSIONS FULL;
-DEFINE FIELD updatedAt ON account TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD userId ON account TYPE record<user> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
+```sh
+npx @better-auth/cli generate
 ```
 
-#### Session Table
+You can also perform this in javascript to print to console:
 
-```sql
-DEFINE TABLE session TYPE ANY SCHEMALESS COMMENT 'better-auth: sessions' PERMISSIONS NONE;
-DEFINE FIELD activeOrganizationId ON session TYPE option<record<organization>> REFERENCE ON DELETE UNSET COMMENT 'The id of the active organization' PERMISSIONS FULL;
-DEFINE FIELD createdAt ON session TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD expiresAt ON session PERMISSIONS FULL;
-DEFINE FIELD id ON session TYPE string PERMISSIONS FULL;
-DEFINE FIELD ipAddress ON session TYPE string PERMISSIONS FULL;
-DEFINE FIELD token ON session TYPE string PERMISSIONS FULL;
-DEFINE FIELD updatedAt ON session TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD userId ON session TYPE record<user> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-```
+```typescript
+const adapterFunc = surrealAdapter(surreal);
 
-#### User Table
+_auth = betterAuth({
+	// ... other Better Auth options
+	database: surrealFunc,
+	plugins: [
+		// ... works with plugins too
+	]
+});
 
-```sql
-DEFINE TABLE user TYPE ANY SCHEMALESS COMMENT 'better-auth: users' PERMISSIONS NONE;
-DEFINE FIELD chats ON user TYPE references<chat> PERMISSIONS FULL;
-DEFINE FIELD defaultOrganizationId ON user TYPE option<record<organization>> PERMISSIONS FULL;
-DEFINE FIELD organizations ON user TYPE references<member> PERMISSIONS FULL;
-```
-
-### Orgs Plugin Schemas
-
-#### Organization Table
-
-```sql
-DEFINE TABLE organization TYPE NORMAL SCHEMALESS COMMENT 'better-auth orgs: organizations' PERMISSIONS NONE;
-DEFINE FIELD createdAt ON organization TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD logo ON organization TYPE option<string> COMMENT 'The logo of the organization' PERMISSIONS FULL;
-DEFINE FIELD metadata ON organization FLEXIBLE TYPE option<object> COMMENT 'Additional metadata for the organization' PERMISSIONS FULL;
-DEFINE FIELD name ON organization TYPE string PERMISSIONS FULL;
-DEFINE FIELD slug ON organization TYPE string PERMISSIONS FULL;
-DEFINE FIELD updatedAt ON organization TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-```
-
-#### Member Table
-
-```sql
-DEFINE TABLE member TYPE NORMAL SCHEMALESS COMMENT 'better-auth orgs: members' PERMISSIONS NONE;
-DEFINE FIELD createdAt ON member TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD organizationId ON member TYPE record<organization> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD role ON member TYPE string PERMISSIONS FULL;
-DEFINE FIELD teamId ON member TYPE option<record<team>> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD userId ON member TYPE record<user> REFERENCE ON DELETE IGNORE PERMISSIONS FULL;
-```
-
-#### Team Table
-
-```sql
-DEFINE TABLE team TYPE NORMAL SCHEMALESS COMMENT 'better-auth orgs: teams' PERMISSIONS NONE;
-DEFINE FIELD createdAt ON team TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD name ON team TYPE string PERMISSIONS FULL;
-DEFINE FIELD organizationId ON team TYPE record<organization> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD updatedAt ON team TYPE option<datetime> DEFAULT time::now() PERMISSIONS FULL;
-```
-
-#### Invitation Table
-
-```sql
-DEFINE TABLE invitation TYPE NORMAL SCHEMALESS COMMENT 'better-auth orgs: invitations' PERMISSIONS NONE;
-DEFINE FIELD createdAt ON invitation TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD email ON invitation TYPE string PERMISSIONS FULL;
-DEFINE FIELD expiresAt ON invitation TYPE datetime PERMISSIONS FULL;
-DEFINE FIELD inviterId ON invitation TYPE record<user> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD organizationId ON invitation TYPE record<organization> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD role ON invitation TYPE string PERMISSIONS FULL;
-DEFINE FIELD teamId ON invitation TYPE option<record<team>> REFERENCE ON DELETE CASCADE PERMISSIONS FULL;
-DEFINE FIELD token ON invitation TYPE string PERMISSIONS FULL;
+const adapter = adapterFunc(_auth.options);
+const schema = await adapter.createSchema!(_auth.options);
+console.log(schema.code);
 ```
 
 ## 🆓 Free SurrealDB Cloud Instance
