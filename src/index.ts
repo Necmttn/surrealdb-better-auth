@@ -25,8 +25,9 @@ const createTransform = (options: BetterAuthOptions) => {
 		if (field === "id") {
 			return field;
 		}
-		const f = schema[model].fields[field];
-		return f.fieldName || field;
+
+		const f = schema[model]?.fields[field];
+		return f?.fieldName || field;
 	}
 
 	return {
@@ -41,25 +42,29 @@ const createTransform = (options: BetterAuthOptions) => {
 					: {
 						id: options.advanced?.generateId
 							? options.advanced.generateId({ model })
-							: data.id || generateId(),
+							: data['id'] || generateId(),
 					};
 
-			const fields = schema[model].fields;
-			for (const field in fields) {
+			const fields = schema[model]?.fields;
+			if (!fields) throw new Error(`Model ${model} not found in schema`);
+
+			for (const [field, fieldValue] of Object.entries(fields)) {
 				const value = data[field];
-				if (value === undefined && !fields[field].defaultValue) {
+				if (value === undefined && !fieldValue.defaultValue) {
 					continue;
 				}
-				transformedData[fields[field].fieldName || field] = withApplyDefault(
+
+				transformedData[fieldValue.fieldName || field] = withApplyDefault(
 					value,
 					{
-						...fields[field],
-						fieldName: fields[field].fieldName || field,
+						...fieldValue,
+						fieldName: fieldValue.fieldName || field,
 					},
 					action,
 					model,
 				);
 			}
+
 			return transformedData;
 		},
 		transformOutput<T extends Record<string, unknown>>(
@@ -69,12 +74,15 @@ const createTransform = (options: BetterAuthOptions) => {
 		) {
 			if (!data) return null;
 			const transformedData: Record<string, unknown> =
-				data.id || data._id
+				data['id'] || data['_id']
 					? select.length === 0 || select.includes("id")
-						? { id: jsonify(data.id) }
+						? { id: jsonify(data['id']) }
 						: {}
 					: {};
-			const tableSchema = schema[model].fields;
+
+			const tableSchema = schema[model]?.fields;
+			if (!tableSchema) throw new Error(`Model ${model} not found in schema`);
+
 			for (const key in tableSchema) {
 				if (select.length && !select.includes(key)) {
 					continue;
@@ -187,6 +195,8 @@ export const surrealAdapter =
 					const db = await ensureConnection();
 					const transformed = transformInput(data, model, "create");
 					const [result] = await db.create(model, transformed);
+
+					if (!result) throw new SurrealDBQueryError("Failed to create record");
 					return transformOutput(result, model) as R;
 				},
 				findOne: async <T>({
@@ -202,8 +212,12 @@ export const surrealAdapter =
 						select.length > 0
 							? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
 							: `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
+
 					const result = await db.query<[Record<string, unknown>[]]>(query);
-					return transformOutput(result[0][0], model, select) as T | null;
+					const output = result[0][0];
+
+					if (!output) throw new SurrealDBQueryError("Failed to find record");
+					return transformOutput(output, model, select) as T | null;
 				},
 				findMany: async <T>({
 					model,
@@ -240,9 +254,12 @@ export const surrealAdapter =
 					const db = await ensureConnection();
 					const whereClause = where ? convertWhereClause(where, model) : "";
 					const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
+
 					const [result] = await db.query<[Record<string, unknown>[]]>(query);
 					const res = result[0];
-					return Number(res.count);
+
+					if (!res) throw new SurrealDBQueryError("Failed to count records");
+					return Number(res['count']);
 				},
 				update: async <T extends Record<string, unknown>, R = T>({
 					model,
@@ -258,7 +275,10 @@ export const surrealAdapter =
 							transformedUpdate,
 						},
 					);
-					return transformOutput(result[0], model) as R;
+
+					const output = result[0];
+					if (!output) throw new SurrealDBQueryError("Failed to update record");
+					return transformOutput(output, model) as R;
 				},
 				delete: async ({ model, where }: { model: string; where: Where[] }) => {
 					const db = await ensureConnection();
@@ -290,7 +310,18 @@ export const surrealAdapter =
 							transformedUpdate,
 						},
 					);
-					return transformOutput(result[0], model) as R;
+
+					const output = result[0];
+					if (!output) throw new SurrealDBQueryError("Failed to update many records");
+					return transformOutput(output, model) as R;
 				},
 			} satisfies Adapter;
 		};
+
+
+export class SurrealDBQueryError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SurrealDBQueryError";
+	}
+}
