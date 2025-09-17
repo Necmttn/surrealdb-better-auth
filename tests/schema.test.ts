@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, Test, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { surrealAdapter, SurrealBetterAuthConfig } from "../src";
 import { getDatabase } from "../db/surreal";
 import { BetterAuthOptions } from "better-auth/types";
@@ -238,8 +238,8 @@ describe("generate - enable records, disable on delete references", async () => 
 
 describe.each([
   's', 'ms', false
-])("generate - roundDefaultTime %p", async (roundDefaultTime) => {
-  const database = `better_auth_test_roundDefaultTime_${roundDefaultTime.toString()}`
+])("generate - floorDefaultTime %p", async (floorDefaultTime) => {
+  const database = `better_auth_test_floorDefaultTime_${floorDefaultTime.toString()}`
   const db = await getDatabase({
     url: "http://127.0.0.1:8000/rpc",
     namespace: "better_auth",
@@ -251,7 +251,7 @@ describe.each([
   });
   const { adapter, opts } = getTestSchemaAdapter(db, {
     generate: {
-      roundAtTimes: roundDefaultTime as 's' | 'ms' | false | undefined,
+      floorAtTimes: floorDefaultTime as 's' | 'ms' | false | undefined,
     }
   });
 
@@ -272,20 +272,20 @@ describe.each([
   test("schema generation", async () => {
     const schema = await adapter.createSchema!(opts)
 
-    if (roundDefaultTime) {
-      expect(schema.code).toContain(`time::round(time::now(), 1${roundDefaultTime})`)
+    if (floorDefaultTime) {
+      expect(schema.code).toContain(`time::floor(time::now(), 1${floorDefaultTime})`)
     } else {
       expect(schema.code).toContain("time::now()")
     }
 
     // Check createdAt, updatedAt, and expiresAt 
-    if (roundDefaultTime === false) {
+    if (floorDefaultTime === false) {
       expect(schema.code).toContain("DEFINE FIELD createdAt ON TABLE user TYPE datetime VALUE time::now() READONLY;");
       expect(schema.code).toContain("DEFINE FIELD updatedAt ON TABLE user TYPE datetime VALUE time::now();");
       expect(schema.code).toContain("DEFINE FIELD expiresAt ON TABLE sessions TYPE datetime;"); // not applied
     } else {
-      expect(schema.code).toContain(`DEFINE FIELD createdAt ON TABLE user TYPE datetime VALUE time::round(time::now(), 1${roundDefaultTime ?? 's'}) READONLY;`);
-      expect(schema.code).toContain(`DEFINE FIELD updatedAt ON TABLE user TYPE datetime VALUE time::round(time::now(), 1${roundDefaultTime ?? 's'});`);
+      expect(schema.code).toContain(`DEFINE FIELD createdAt ON TABLE user TYPE datetime VALUE time::floor(time::now(), 1${floorDefaultTime ?? 's'}) READONLY;`);
+      expect(schema.code).toContain(`DEFINE FIELD updatedAt ON TABLE user TYPE datetime VALUE time::floor(time::now(), 1${floorDefaultTime ?? 's'});`);
       expect(schema.code).toContain(`DEFINE FIELD expiresAt ON TABLE sessions TYPE datetime;`); // not applied
     }
 

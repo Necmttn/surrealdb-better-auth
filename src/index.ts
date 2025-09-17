@@ -1,7 +1,7 @@
 import type { FieldType} from 'better-auth/db';
 import { getAuthTables } from 'better-auth/db';
-import { createAdapter } from "better-auth/adapters";
-import type { CreateCustomAdapter } from "better-auth/adapters";
+import { createAdapterFactory } from "better-auth/adapters";
+import type { AdapterFactoryCustomizeAdapterCreator } from "better-auth/adapters";
 import type { BetterAuthOptions, Where } from 'better-auth/types';
 import type { RecordIdValue, Surreal } from 'surrealdb';
 import { RecordId, StringRecordId } from 'surrealdb';
@@ -36,11 +36,11 @@ export interface SurrealBetterAuthConfig {
 		 */
 		disableOnDeleteReference?: boolean
 		/**
-		 * Rounds default times using time::round
+		 * Floors default times using time::floor
 		 * 
 		 * @default 's' - seconds
 		 */
-		roundAtTimes?: 's' | 'ms' | false
+		floorAtTimes?: 's' | 'ms' | false
 	}
 }
 
@@ -53,6 +53,14 @@ const createTransform = (options: BetterAuthOptions, config?: SurrealBetterAuthC
         }
         const f = schema[model].fields[field];
         return f.fieldName || field;
+    }
+
+    // TODO: Improve this with direct access instead of for-loop
+    function getFieldAttributes(model: string, field: string) {
+        // Find field with name
+        const sc = Object.values(schema).find((val) => val.modelName === model)
+        if (!sc) return undefined
+        return sc?.fields[field];
     }
 
     return {
@@ -84,12 +92,15 @@ const createTransform = (options: BetterAuthOptions, config?: SurrealBetterAuthC
                 // Convert field to RecordId
                 if (
                     field === 'id'
-                    || (field.endsWith('Id') && config?.enableRecords)
+                    || (config?.enableRecords && getFieldAttributes(model, field)?.references)
                 ) {
                     const toRecordId = (v: RecordIdValue) => {
+                        const fieldAttributes = getFieldAttributes(model, field)?.references
                         return typeof v === 'string' && v.match(/^[a-zA-Z]+:/)
                             ? new StringRecordId(v)
-                            : new RecordId(model, v)
+                            : fieldAttributes?.model
+                                ? new RecordId(fieldAttributes.model, v)
+                                : new RecordId(model, v)
                     }
                     if (Array.isArray(value)) {
                         value = value.map((v) => {
@@ -111,6 +122,7 @@ const createTransform = (options: BetterAuthOptions, config?: SurrealBetterAuthC
             }
         },
         getField,
+        getFieldAttributes,
     };
 };
 
@@ -119,7 +131,7 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
         throw new Error("SurrealDB adapter requires a SurrealDB client");
     }
 
-    return createAdapter({
+    return createAdapterFactory({
         config: {
             adapterId: "surreal",
             supportsBooleans: true,
@@ -127,14 +139,21 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
             supportsDates: true,
             supportsNumericIds: true,
             disableIdGeneration: true,
-            customTransformInput: ({ field, data }) => {
-                // Attempt to transform a string to a RecordId
+            customTransformInput: ({ field, data, model, fieldAttributes }) => {
                 if (
-                    config?.enableRecords
-                    && (field === 'id' || field.endsWith('Id'))
-                    && typeof data === 'string'
+                    field === 'id' ||
+                    (config?.enableRecords && fieldAttributes?.references)
                 ) {
-                    data = new StringRecordId(data)
+                    if (field === 'id') {
+                        data = typeof data === 'string' && data.startsWith(model + ":")
+                            ? new StringRecordId(data)
+                            : new RecordId(model, data)
+                    } else if (fieldAttributes.references?.model) {
+                        const _model = fieldAttributes.references.model
+                        data = typeof data === 'string' && data.startsWith(_model + ":")
+                            ? new StringRecordId(data)
+                            : new RecordId(_model, data)
+                    }
                 }
                 return data
             },
@@ -255,9 +274,9 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                     }
                     let code = ''
                     const overwrite = config?.generate?.overwrite ? "OVERWRITE " : ""
-                    const defaultTimeNow = config?.generate?.roundAtTimes === false
+                    const defaultTimeNow = config?.generate?.floorAtTimes === false
                         ? `time::now()`
-                        : `time::round(time::now(), 1${config?.generate?.roundAtTimes ?? 's'})`
+                        : `time::floor(time::now(), 1${config?.generate?.floorAtTimes ?? 's'})`
 
                     for (const [tablekey, table] of Object.entries(tables)) {
                         const tableName = table.modelName ?? tablekey
@@ -268,13 +287,9 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                             const typeKey = Array.isArray(field.type) ? `${field.type[0]}[]` as FieldType : field.type;
                             let type = typeMap[typeKey as string] ?? "any"
 
-                            if (
-                                config?.enableRecords
-                                && field.references
-                                && field.references.field === 'id'
-                            ) {
+                            if (config?.enableRecords && field.references) {
                                 type = (typeKey as string).endsWith("[]")
-                                    ? `record<array<${field.references.model}>>`
+                                    ? `array<record<${field.references.model}>>`
                                     : `record<${field.references.model}>`
                             }
 
@@ -290,7 +305,7 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                                 } else if (fieldkey === "updatedAt") {
                                     defaultStr = ` VALUE ${defaultTimeNow}`
                                 } else if (fieldkey?.endsWith('At')) {
-                                    const roundAtTimes = config?.generate?.roundAtTimes
+                                    const roundAtTimes = config?.generate?.floorAtTimes
                                     const valueRounded = roundAtTimes !== false ? `time::round($value, 1${roundAtTimes ?? 's'})` : ""
                                     defaultStr = valueRounded.length ? ` VALUE ${valueRounded}` : ""
                                 } else {
@@ -333,7 +348,7 @@ export const surrealAdapter = (db: Surreal, config?: SurrealBetterAuthConfig) =>
                         path: file ?? 'auth.surql',
                     }
                 },
-            } satisfies ReturnType<CreateCustomAdapter>
+            } satisfies ReturnType<AdapterFactoryCustomizeAdapterCreator>
         },
     })
 };

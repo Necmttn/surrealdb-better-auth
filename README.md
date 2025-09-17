@@ -63,24 +63,6 @@ export const auth = betterAuth({
 });
 ```
 
-### Records Enabled Setup
-
-When enabling records, all fields ending with 'Id' will be treated as a SurrealDb RecordId. You may need to inspect some plugins to ensure that they do not use this pattern. The following updates the reserved schemas.
-
-```typescript
-export const auth = betterAuth({
-	database: surrealAdapter(surrealdb, {
-		enableRecords: true,
-	}),
-	account: {
-		fields: {
-			accountId: "subject", // renames 'accountId' to 'subject'
-			providerId: "name",		// renames 'providerId' to 'name'
-		},
-	},
-});
-```
-
 ## 📋 Schema Generation
 
 You can automatically run to generate a schema based on your configuration to a Surql file.
