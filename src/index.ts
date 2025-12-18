@@ -50,8 +50,8 @@ const createTransform = (options: BetterAuthOptions) => {
 
             for (const [field, fieldValue] of Object.entries(fields)) {
                 const value = data[field];
-                if (value === undefined && !fieldValue.defaultValue) {
-                    continue;
+                if (value === undefined) {
+                    continue;  // Skip undefined values, let SurrealDB defaults apply
                 }
 
                 transformedData[fieldValue.fieldName || field] = withApplyDefault(
