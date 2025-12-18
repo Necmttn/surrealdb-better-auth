@@ -315,6 +315,128 @@ export const surrealAdapter =
                     if (!output) throw new SurrealDBQueryError("Failed to update many records");
                     return transformOutput(output, model) as R;
                 },
+                // Transaction support - SurrealDB doesn't have built-in transaction API,
+                // so we execute operations sequentially without actual transaction isolation
+                transaction: async <R>(callback: (trx: Omit<Adapter, 'transaction'>) => Promise<R>): Promise<R> => {
+                    // Create a transaction adapter that excludes the transaction method itself
+                    const trxAdapter: Omit<Adapter, 'transaction'> = {
+                        id: "surreal",
+                        create: async <T extends Record<string, unknown>, R = T>({
+                            model,
+                            data,
+                        }: { model: string; data: T }) => {
+                            const db = await ensureConnection();
+                            const transformed = transformInput(data, model, "create");
+                            const [result] = await db.create(model, transformed);
+                            if (!result) throw new SurrealDBQueryError("Failed to create record");
+                            return transformOutput(result, model) as R;
+                        },
+                        findOne: async <T>({
+                            model,
+                            where,
+                            select = [],
+                        }: { model: string; where: Where[]; select?: string[] }) => {
+                            const db = await ensureConnection();
+                            const whereClause = convertWhereClause(where, model);
+                            const selectClause =
+                                (select.length > 0 && select.map((f) => getField(model, f))) || [];
+                            const query =
+                                select.length > 0
+                                    ? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
+                                    : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
+                            const result = await db.query<[Record<string, unknown>[]]>(query);
+                            const output = result[0][0];
+                            if (!output) return null;
+                            return transformOutput(output, model, select) as T | null;
+                        },
+                        findMany: async <T>({
+                            model,
+                            where,
+                            sortBy,
+                            limit,
+                            offset,
+                        }: {
+                            model: string;
+                            where?: Where[];
+                            sortBy?: { field: string; direction: "asc" | "desc" };
+                            limit?: number;
+                            offset?: number;
+                        }) => {
+                            const db = await ensureConnection();
+                            let query = `SELECT * FROM ${model}`;
+                            if (where) {
+                                const whereClause = convertWhereClause(where, model);
+                                query += ` WHERE ${whereClause}`;
+                            }
+                            if (sortBy) {
+                                query += ` ORDER BY ${getField(model, sortBy.field)} ${sortBy.direction}`;
+                            }
+                            if (limit !== undefined) {
+                                query += ` LIMIT ${limit}`;
+                            }
+                            if (offset !== undefined) {
+                                query += ` START ${offset}`;
+                            }
+                            const [results] = await db.query<[Record<string, unknown>[]]>(query);
+                            return results.map((record) => transformOutput(record, model) as T);
+                        },
+                        count: async ({ model, where }: { model: string; where?: Where[] }) => {
+                            const db = await ensureConnection();
+                            const whereClause = where ? convertWhereClause(where, model) : "";
+                            const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
+                            const [result] = await db.query<[Record<string, unknown>[]]>(query);
+                            const res = result[0];
+                            if (!res) throw new SurrealDBQueryError("Failed to count records");
+                            return Number(res['count']);
+                        },
+                        update: async <T extends Record<string, unknown>, R = T>({
+                            model,
+                            where,
+                            update,
+                        }: { model: string; where: Where[]; update: T }) => {
+                            const db = await ensureConnection();
+                            const whereClause = convertWhereClause(where, model);
+                            const transformedUpdate = transformInput(update, model, "update");
+                            const [result] = await db.query<[Record<string, unknown>[]]>(
+                                `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
+                                { transformedUpdate },
+                            );
+                            const output = result[0];
+                            if (!output) throw new SurrealDBQueryError("Failed to update record");
+                            return transformOutput(output, model) as R;
+                        },
+                        delete: async ({ model, where }: { model: string; where: Where[] }) => {
+                            const db = await ensureConnection();
+                            const whereClause = convertWhereClause(where, model);
+                            await db.query(`DELETE FROM ${model} WHERE ${whereClause}`);
+                        },
+                        deleteMany: async ({ model, where }: { model: string; where: Where[] }) => {
+                            const db = await ensureConnection();
+                            const whereClause = convertWhereClause(where, model);
+                            const [result] = await db.query<[Record<string, unknown>[]]>(
+                                `DELETE FROM ${model} WHERE ${whereClause}`,
+                            );
+                            return result.length;
+                        },
+                        updateMany: async <T extends Record<string, unknown>, R = T>({
+                            model,
+                            where,
+                            update,
+                        }: { model: string; where: Where[]; update: T }) => {
+                            const db = await ensureConnection();
+                            const whereClause = convertWhereClause(where, model);
+                            const transformedUpdate = transformInput(update, model, "update");
+                            const [result] = await db.query<[Record<string, unknown>[]]>(
+                                `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
+                                { transformedUpdate },
+                            );
+                            const output = result[0];
+                            if (!output) throw new SurrealDBQueryError("Failed to update many records");
+                            return transformOutput(output, model) as R;
+                        },
+                    };
+                    return callback(trxAdapter);
+                },
             } satisfies Adapter;
         };
 
