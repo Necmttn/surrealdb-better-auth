@@ -210,26 +210,11 @@ export const surrealAdapter =
                     const selectClause =
                         (select.length > 0 && select.map((f) => getField(model, f))) || [];
 
-                    // Build join subqueries for related entities
-                    const joinClauses = Object.entries(join)
-                        .filter(([_, joinOpt]) => !!joinOpt)
-                        .map(([joinModel, joinOpt]) => {
-                            const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
-                            // For account join on user model, use userId foreign key
-                            if (joinModel === 'account' && model === 'user') {
-                                return `(SELECT * FROM account WHERE userId = $parent.id${limit}) AS ${joinModel}`;
-                            }
-                            // Generic pattern: assume foreign key is modelId
-                            const foreignKey = `${model}Id`;
-                            return `(SELECT * FROM ${joinModel} WHERE ${foreignKey} = $parent.id${limit}) AS ${joinModel}`;
-                        });
-
-                    const joinSelect = joinClauses.length > 0 ? `, ${joinClauses.join(", ")}` : "";
-
+                    // First query: get the main record
                     const query =
                         select.length > 0
-                            ? `SELECT ${selectClause.join(", ")}${joinSelect} FROM ${model} WHERE ${whereClause} LIMIT 1`
-                            : `SELECT *${joinSelect} FROM ${model} WHERE ${whereClause} LIMIT 1`;
+                            ? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
+                            : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
 
                     const result = await db.query<[Record<string, unknown>[]]>(query);
                     const output = result[0][0];
@@ -238,15 +223,27 @@ export const surrealAdapter =
 
                     const transformed = transformOutput(output, model, select) as Record<string, unknown>;
 
-                    // Preserve and transform joined relations
+                    // Fetch joined relations with separate queries
                     for (const [joinModel, joinOpt] of Object.entries(join)) {
-                        if (joinOpt && output[joinModel] !== undefined) {
-                            const joinedData = output[joinModel];
-                            transformed[joinModel] = Array.isArray(joinedData)
-                                ? joinedData.map((item: Record<string, unknown>) =>
-                                    transformOutput(item, joinModel))
-                                : joinedData;
+                        if (!joinOpt) continue;
+
+                        const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
+                        let joinQuery: string;
+
+                        // For account join on user model, use userId foreign key
+                        if (joinModel === 'account' && model === 'user') {
+                            const userId = output['id'];
+                            joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
+                        } else {
+                            // Generic pattern: assume foreign key is modelId
+                            const foreignKey = `${model}Id`;
+                            const recordId = output['id'];
+                            joinQuery = `SELECT * FROM ${joinModel} WHERE ${foreignKey} = ${jsonify(recordId)}${limit}`;
                         }
+
+                        const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
+                        transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
+                            transformOutput(item, joinModel));
                     }
 
                     return transformed as T | null;
@@ -374,38 +371,36 @@ export const surrealAdapter =
                             const selectClause =
                                 (select.length > 0 && select.map((f) => getField(model, f))) || [];
 
-                            // Build join subqueries for related entities
-                            const joinClauses = Object.entries(join)
-                                .filter(([_, joinOpt]) => !!joinOpt)
-                                .map(([joinModel, joinOpt]) => {
-                                    const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
-                                    if (joinModel === 'account' && model === 'user') {
-                                        return `(SELECT * FROM account WHERE userId = $parent.id${limit}) AS ${joinModel}`;
-                                    }
-                                    const foreignKey = `${model}Id`;
-                                    return `(SELECT * FROM ${joinModel} WHERE ${foreignKey} = $parent.id${limit}) AS ${joinModel}`;
-                                });
-
-                            const joinSelect = joinClauses.length > 0 ? `, ${joinClauses.join(", ")}` : "";
-
+                            // First query: get the main record
                             const query =
                                 select.length > 0
-                                    ? `SELECT ${selectClause.join(", ")}${joinSelect} FROM ${model} WHERE ${whereClause} LIMIT 1`
-                                    : `SELECT *${joinSelect} FROM ${model} WHERE ${whereClause} LIMIT 1`;
+                                    ? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
+                                    : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
                             const result = await db.query<[Record<string, unknown>[]]>(query);
                             const output = result[0][0];
                             if (!output) return null;
 
                             const transformed = transformOutput(output, model, select) as Record<string, unknown>;
 
+                            // Fetch joined relations with separate queries
                             for (const [joinModel, joinOpt] of Object.entries(join)) {
-                                if (joinOpt && output[joinModel] !== undefined) {
-                                    const joinedData = output[joinModel];
-                                    transformed[joinModel] = Array.isArray(joinedData)
-                                        ? joinedData.map((item: Record<string, unknown>) =>
-                                            transformOutput(item, joinModel))
-                                        : joinedData;
+                                if (!joinOpt) continue;
+
+                                const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
+                                let joinQuery: string;
+
+                                if (joinModel === 'account' && model === 'user') {
+                                    const userId = output['id'];
+                                    joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
+                                } else {
+                                    const foreignKey = `${model}Id`;
+                                    const recordId = output['id'];
+                                    joinQuery = `SELECT * FROM ${joinModel} WHERE ${foreignKey} = ${jsonify(recordId)}${limit}`;
                                 }
+
+                                const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
+                                transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
+                                    transformOutput(item, joinModel));
                             }
 
                             return transformed as T | null;
