@@ -99,8 +99,14 @@ const createTransform = (options: BetterAuthOptions) => {
                 .map((clause) => {
                     const { field: _field, value, operator } = clause;
                     const field = getField(model, _field);
+
+                    // Handle null/undefined values
+                    if (value === undefined || value === null) {
+                        return `${field} = NONE`;
+                    }
+
                     const v = value as unknown as RecordId;
-                    const isRecordId = !!v.tb;
+                    const isRecordId = !!v?.tb;
                     switch (operator) {
                         case "eq":
                             return field === "id" || isRecordId
