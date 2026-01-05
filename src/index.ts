@@ -297,7 +297,9 @@ export const surrealAdapter =
                 count: async ({ model, where }: { model: string; where?: Where[] }) => {
                     const db = await ensureConnection();
                     const whereClause = where ? convertWhereClause(where, model) : "";
-                    const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
+                    const query = whereClause
+                        ? `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`
+                        : `SELECT count() FROM ${model} GROUP ALL`;
 
                     const [result] = await db.query<[Record<string, unknown>[]]>(query);
                     const res = result[0];
@@ -463,7 +465,9 @@ export const surrealAdapter =
                         count: async ({ model, where }: { model: string; where?: Where[] }) => {
                             const db = await ensureConnection();
                             const whereClause = where ? convertWhereClause(where, model) : "";
-                            const query = `SELECT count(${whereClause}) FROM ${model} GROUP ALL`;
+                            const query = whereClause
+                                ? `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`
+                                : `SELECT count() FROM ${model} GROUP ALL`;
                             const [result] = await db.query<[Record<string, unknown>[]]>(query);
                             const res = result[0];
                             if (!res) throw new SurrealDBQueryError("Failed to count records");
