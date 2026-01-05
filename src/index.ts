@@ -240,6 +240,10 @@ export const surrealAdapter =
                         if (joinModel === 'account' && model === 'user') {
                             const userId = output['id'];
                             joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
+                        } else if (joinModel === 'user' && model === 'session') {
+                            // Session has userId foreign key referencing user
+                            const userId = output['userId'];
+                            joinQuery = `SELECT * FROM user WHERE id = ${jsonify(userId)}${limit}`;
                         } else {
                             // Generic pattern: assume foreign key is modelId
                             const foreignKey = `${model}Id`;
@@ -248,8 +252,13 @@ export const surrealAdapter =
                         }
 
                         const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
-                        transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
-                            transformOutput(item, joinModel));
+                        // For single-record relations (like user from session), unwrap the array
+                        if (joinModel === 'user' && model === 'session') {
+                            transformed[joinModel] = joinResults[0] ? transformOutput(joinResults[0], joinModel) : null;
+                        } else {
+                            transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
+                                transformOutput(item, joinModel));
+                        }
                     }
 
                     return transformed as T | null;
@@ -398,6 +407,10 @@ export const surrealAdapter =
                                 if (joinModel === 'account' && model === 'user') {
                                     const userId = output['id'];
                                     joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
+                                } else if (joinModel === 'user' && model === 'session') {
+                                    // Session has userId foreign key referencing user
+                                    const userId = output['userId'];
+                                    joinQuery = `SELECT * FROM user WHERE id = ${jsonify(userId)}${limit}`;
                                 } else {
                                     const foreignKey = `${model}Id`;
                                     const recordId = output['id'];
@@ -405,8 +418,13 @@ export const surrealAdapter =
                                 }
 
                                 const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
-                                transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
-                                    transformOutput(item, joinModel));
+                                // For single-record relations (like user from session), unwrap the array
+                                if (joinModel === 'user' && model === 'session') {
+                                    transformed[joinModel] = joinResults[0] ? transformOutput(joinResults[0], joinModel) : null;
+                                } else {
+                                    transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
+                                        transformOutput(item, joinModel));
+                                }
                             }
 
                             return transformed as T | null;
