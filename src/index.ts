@@ -101,134 +101,146 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
     };
 
     /**
-     * Check if a field should be treated as containing a RecordId
-     * - `id` field always contains RecordIds
-     * - Foreign key fields ending in `Id` that reference our tables
-     * - `accountId`, `providerId` are NOT RecordIds - they're OAuth string identifiers
+     * Fields that are explicitly NOT RecordIds (OAuth/external identifiers)
      */
-    const isRecordIdField = (field: string): boolean => {
-        // `id` is always a RecordId
-        if (field === "id") return true;
-        // Core auth foreign keys
-        if (field === "userId" || field === "sessionId") return true;
-        // Organization plugin foreign keys
-        if (field === "organizationId" || field === "teamId" || field === "inviterId" || field === "invitationId") return true;
-        // Member reference
-        if (field === "memberId") return true;
-        // accountId and providerId are NOT RecordIds - they're OAuth identifiers
-        return false;
-    };
+    const nonRecordIdFields = new Set(["accountId", "providerId"]);
 
     /**
-     * Serialize a value for SurrealQL queries
-     * - RecordId strings (table:id format) in RecordId fields are NOT quoted
-     * - Regular strings get JSON-quoted
-     * - Dates get converted to ISO strings
-     * - Arrays and objects use JSON.stringify
-     * - Numbers and booleans are used as-is
+     * Create serialization functions with schema-aware RecordId detection
      */
-    const serializeValue = (value: unknown, field?: string): string => {
-        if (value === undefined || value === null) {
-            return "NONE";
-        }
-        if (typeof value === "string") {
-            // Only treat as RecordId if:
-            // 1. The field is a known RecordId field (id, userId, sessionId)
-            // 2. AND the value looks like a RecordId
-            if (field && isRecordIdField(field) && isRecordIdString(value)) {
-                return value;
+    const createSerializationFunctions = (recordIdFieldsMap: Map<string, Set<string>>) => {
+        /**
+         * Check if a field should be treated as a RecordId
+         * Uses schema metadata when available, falls back to heuristics
+         */
+        const isRecordIdField = (field: string, model?: string): boolean => {
+            // id is always a RecordId
+            if (field === "id") return true;
+            // OAuth/external identifiers are never RecordIds
+            if (nonRecordIdFields.has(field)) return false;
+            // Check schema-based map if model is provided
+            if (model && recordIdFieldsMap.has(model)) {
+                return recordIdFieldsMap.get(model)!.has(field);
+            }
+            // Fallback: field ends with Id (for fields not in schema)
+            return field.endsWith("Id");
+        };
+
+        /**
+         * Serialize a value for SurrealQL queries
+         * - RecordId strings (table:id format) in RecordId fields are NOT quoted
+         * - Regular strings get JSON-quoted
+         * - Dates get converted to ISO strings
+         * - Arrays and objects use JSON.stringify
+         * - Numbers and booleans are used as-is
+         */
+        const serializeValue = (value: unknown, field?: string, model?: string): string => {
+            if (value === undefined || value === null) {
+                return "NONE";
+            }
+            if (typeof value === "string") {
+                // Only treat as RecordId if:
+                // 1. The field is a known RecordId field
+                // 2. AND the value looks like a RecordId
+                if (field && isRecordIdField(field, model) && isRecordIdString(value)) {
+                    return value;
+                }
+                return JSON.stringify(value);
+            }
+            if (typeof value === "number" || typeof value === "boolean") {
+                return String(value);
+            }
+            if (value instanceof Date) {
+                return `d"${value.toISOString()}"`;
+            }
+            if (Array.isArray(value)) {
+                // Pass the field through so array elements are properly handled as RecordIds if needed
+                return `[${value.map(v => serializeValue(v, field, model)).join(", ")}]`;
+            }
+            if (typeof value === "object" && value !== null) {
+                // Check if it's a RecordId (has tb property)
+                if ("tb" in value) {
+                    return jsonify(value);
+                }
+                return JSON.stringify(value);
             }
             return JSON.stringify(value);
-        }
-        if (typeof value === "number" || typeof value === "boolean") {
-            return String(value);
-        }
-        if (value instanceof Date) {
-            return `d"${value.toISOString()}"`;
-        }
-        if (Array.isArray(value)) {
-            // Pass the field through so array elements are properly handled as RecordIds if needed
-            return `[${value.map(v => serializeValue(v, field)).join(", ")}]`;
-        }
-        if (typeof value === "object" && value !== null) {
-            // Check if it's a RecordId (has tb property)
-            if ("tb" in value) {
-                return jsonify(value);
-            }
-            return JSON.stringify(value);
-        }
-        return JSON.stringify(value);
-    };
+        };
 
-    /**
-     * Convert a where clause array to SurrealDB WHERE string
-     * Note: Field names are already transformed by the wrapper
-     */
-    const buildWhereClause = (
-        where: Array<{ field: string; value: unknown; operator?: string }>
-    ): string => {
-        if (!where || where.length === 0) return "";
+        /**
+         * Convert a where clause array to SurrealDB WHERE string
+         */
+        const buildWhereClause = (
+            where: Array<{ field: string; value: unknown; operator?: string }>,
+            model?: string
+        ): string => {
+            if (!where || where.length === 0) return "";
 
-        return where
-            .map((clause) => {
-                const field = clause.field;
-                const value = clause.value;
-                const operator = clause.operator || "eq";
+            return where
+                .map((clause) => {
+                    const field = clause.field;
+                    const value = clause.value;
+                    const operator = clause.operator || "eq";
 
-                // Handle null/undefined values
-                if (value === undefined || value === null) {
-                    return `${field} = NONE`;
-                }
+                    // Handle null/undefined values
+                    if (value === undefined || value === null) {
+                        return `${field} = NONE`;
+                    }
 
-                switch (operator) {
-                    case "eq":
-                        return `${field} = ${serializeValue(value, field)}`;
-                    case "ne":
-                        return `${field} != ${serializeValue(value, field)}`;
-                    case "gt":
-                        return `${field} > ${serializeValue(value, field)}`;
-                    case "gte":
-                        return `${field} >= ${serializeValue(value, field)}`;
-                    case "lt":
-                        return `${field} < ${serializeValue(value, field)}`;
-                    case "lte":
-                        return `${field} <= ${serializeValue(value, field)}`;
-                    case "in":
-                        return `${field} IN ${serializeValue(value, field)}`;
-                    case "contains":
-                        return `${field} CONTAINS ${serializeValue(value, field)}`;
-                    case "starts_with":
-                        return `string::starts_with(${field}, ${serializeValue(value, field)})`;
-                    case "ends_with":
-                        return `string::ends_with(${field}, ${serializeValue(value, field)})`;
-                    default:
-                        return `${field} = ${serializeValue(value, field)}`;
-                }
-            })
-            .join(" AND ");
+                    switch (operator) {
+                        case "eq":
+                            return `${field} = ${serializeValue(value, field, model)}`;
+                        case "ne":
+                            return `${field} != ${serializeValue(value, field, model)}`;
+                        case "gt":
+                            return `${field} > ${serializeValue(value, field, model)}`;
+                        case "gte":
+                            return `${field} >= ${serializeValue(value, field, model)}`;
+                        case "lt":
+                            return `${field} < ${serializeValue(value, field, model)}`;
+                        case "lte":
+                            return `${field} <= ${serializeValue(value, field, model)}`;
+                        case "in":
+                            return `${field} IN ${serializeValue(value, field, model)}`;
+                        case "contains":
+                            return `${field} CONTAINS ${serializeValue(value, field, model)}`;
+                        case "starts_with":
+                            return `string::starts_with(${field}, ${serializeValue(value, field, model)})`;
+                        case "ends_with":
+                            return `string::ends_with(${field}, ${serializeValue(value, field, model)})`;
+                        default:
+                            return `${field} = ${serializeValue(value, field, model)}`;
+                    }
+                })
+                .join(" AND ");
+        };
+
+        return { isRecordIdField, serializeValue, buildWhereClause };
     };
 
     /**
      * Transform field values for SurrealDB
-     * - Convert *Id fields to StringRecordId
+     * - Convert *Id fields to StringRecordId (using schema-aware detection)
      */
-    const transformValueForDB = (field: string, value: unknown): unknown => {
-        if (value === undefined || value === null) {
-            return value;
-        }
-
-        // Convert foreign key fields to RecordId
-        if (field.endsWith("Id") && typeof value === "string" && !field.startsWith("provider") && !field.startsWith("account")) {
-            // Extract the referenced model from field name (e.g., "userId" -> "user")
-            const refModel = field.slice(0, -2);
-            // Don't convert if it's already a RecordId string format
-            if (!value.includes(":")) {
-                return new StringRecordId(`${refModel}:${value}`);
+    const createTransformValueForDB = (isRecordIdField: (field: string, model?: string) => boolean) => {
+        return (field: string, value: unknown, model?: string): unknown => {
+            if (value === undefined || value === null) {
+                return value;
             }
-            return new StringRecordId(value);
-        }
 
-        return value;
+            // Convert foreign key fields to RecordId using schema-aware detection
+            if (typeof value === "string" && isRecordIdField(field, model) && field !== "id") {
+                // Extract the referenced model from field name (e.g., "userId" -> "user")
+                const refModel = field.slice(0, -2);
+                // Don't convert if it's already a RecordId string format
+                if (!value.includes(":")) {
+                    return new StringRecordId(`${refModel}:${value}`);
+                }
+                return new StringRecordId(value);
+            }
+
+            return value;
+        };
     };
 
     return createAdapterFactory({
@@ -244,13 +256,30 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
             // Let the factory handle joins via multiple queries
             supportsJoin: false,
         },
-        adapter: ({ debugLog }) => {
-            // Note: The wrapper already handles:
-            // - Model name transformation (via getModelName)
-            // - Field name transformation (via transformInput/transformWhereClause)
-            // - Input/output data transformation
-            //
-            // Our job is just to execute the DB operations with the already-transformed data.
+        adapter: ({ debugLog, schema }) => {
+            // Build RecordId fields map from schema metadata
+            // Fields with `references` property are foreign keys and should be RecordIds
+            const recordIdFieldsMap = new Map<string, Set<string>>();
+
+            if (schema) {
+                for (const [modelName, modelDef] of Object.entries(schema)) {
+                    const recordIdFields = new Set<string>(["id"]);
+                    const fields = (modelDef as { fields?: Record<string, { references?: { model: string } }> }).fields;
+                    if (fields) {
+                        for (const [fieldName, fieldDef] of Object.entries(fields)) {
+                            // Check if field has references (foreign key)
+                            if (fieldDef.references?.model) {
+                                recordIdFields.add(fieldName);
+                            }
+                        }
+                    }
+                    recordIdFieldsMap.set(modelName, recordIdFields);
+                }
+            }
+
+            // Create schema-aware functions
+            const { isRecordIdField, buildWhereClause } = createSerializationFunctions(recordIdFieldsMap);
+            const transformValueForDB = createTransformValueForDB(isRecordIdField);
 
             return {
                 create: async ({ model, data }) => {
@@ -259,7 +288,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
                     // Transform foreign key references to RecordIds
                     const transformedData: Record<string, unknown> = {};
                     for (const [key, value] of Object.entries(data)) {
-                        transformedData[key] = transformValueForDB(key, value);
+                        transformedData[key] = transformValueForDB(key, value, model);
                     }
 
                     debugLog?.("create", { model, data: transformedData });
@@ -281,7 +310,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                 findOne: async ({ model, where }) => {
                     const conn = await ensureConnection();
-                    const whereClause = buildWhereClause(where);
+                    const whereClause = buildWhereClause(where, model);
 
                     const query = `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
                     debugLog?.("findOne", { model, query });
@@ -308,7 +337,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
                     let query = `SELECT * FROM ${model}`;
 
                     if (where && where.length > 0) {
-                        const whereClause = buildWhereClause(where);
+                        const whereClause = buildWhereClause(where, model);
                         query += ` WHERE ${whereClause}`;
                     }
 
@@ -340,12 +369,12 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                 update: async ({ model, where, update }) => {
                     const conn = await ensureConnection();
-                    const whereClause = buildWhereClause(where);
+                    const whereClause = buildWhereClause(where, model);
 
                     // Transform foreign key references to RecordIds
                     const transformedUpdate: Record<string, unknown> = {};
                     for (const [key, value] of Object.entries(update)) {
-                        transformedUpdate[key] = transformValueForDB(key, value);
+                        transformedUpdate[key] = transformValueForDB(key, value, model);
                     }
 
                     const query = `UPDATE ${model} MERGE $data WHERE ${whereClause}`;
@@ -372,12 +401,12 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                 updateMany: async ({ model, where, update }) => {
                     const conn = await ensureConnection();
-                    const whereClause = buildWhereClause(where);
+                    const whereClause = buildWhereClause(where, model);
 
                     // Transform foreign key references to RecordIds
                     const transformedUpdate: Record<string, unknown> = {};
                     for (const [key, value] of Object.entries(update)) {
-                        transformedUpdate[key] = transformValueForDB(key, value);
+                        transformedUpdate[key] = transformValueForDB(key, value, model);
                     }
 
                     const query = `UPDATE ${model} MERGE $data WHERE ${whereClause}`;
@@ -392,7 +421,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                 delete: async ({ model, where }) => {
                     const conn = await ensureConnection();
-                    const whereClause = buildWhereClause(where);
+                    const whereClause = buildWhereClause(where, model);
 
                     const query = `DELETE FROM ${model} WHERE ${whereClause}`;
                     debugLog?.("delete", { model, query });
@@ -402,7 +431,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                 deleteMany: async ({ model, where }) => {
                     const conn = await ensureConnection();
-                    const whereClause = buildWhereClause(where);
+                    const whereClause = buildWhereClause(where, model);
 
                     const query = `DELETE FROM ${model} WHERE ${whereClause}`;
                     debugLog?.("deleteMany", { model, query });
@@ -416,7 +445,7 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
 
                     let query: string;
                     if (where && where.length > 0) {
-                        const whereClause = buildWhereClause(where);
+                        const whereClause = buildWhereClause(where, model);
                         query = `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`;
                     } else {
                         query = `SELECT count() FROM ${model} GROUP ALL`;
