@@ -103,14 +103,18 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
     /**
      * Check if a field should be treated as containing a RecordId
      * - `id` field always contains RecordIds
-     * - `userId`, `sessionId` are foreign keys to our tables
-     * - `accountId`, `providerId` are NOT RecordIds - they're string identifiers
+     * - Foreign key fields ending in `Id` that reference our tables
+     * - `accountId`, `providerId` are NOT RecordIds - they're OAuth string identifiers
      */
     const isRecordIdField = (field: string): boolean => {
         // `id` is always a RecordId
         if (field === "id") return true;
-        // Foreign keys to our tables
+        // Core auth foreign keys
         if (field === "userId" || field === "sessionId") return true;
+        // Organization plugin foreign keys
+        if (field === "organizationId" || field === "teamId" || field === "inviterId" || field === "invitationId") return true;
+        // Member reference
+        if (field === "memberId") return true;
         // accountId and providerId are NOT RecordIds - they're OAuth identifiers
         return false;
     };
@@ -143,7 +147,8 @@ export const surrealAdapter = (config: SurrealAdapterConfig) => {
             return `d"${value.toISOString()}"`;
         }
         if (Array.isArray(value)) {
-            return `[${value.map(v => serializeValue(v)).join(", ")}]`;
+            // Pass the field through so array elements are properly handled as RecordIds if needed
+            return `[${value.map(v => serializeValue(v, field)).join(", ")}]`;
         }
         if (typeof value === "object" && value !== null) {
             // Check if it's a RecordId (has tb property)

@@ -1,0 +1,4 @@
+#V2
+SELECT * FROM account;
+SELECT * FROM user LIMIT 5; SELECT * FROM account LIMIT 5;
+SELECT * FROM user; SELECT * FROM account; SELECT * FROM session;
