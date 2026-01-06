@@ -1,533 +1,443 @@
-import { generateId } from "better-auth";
-import { getAuthTables } from "better-auth/db";
-import type { Adapter, BetterAuthOptions, Where } from "better-auth/types";
-import { jsonify, type RecordId } from "surrealdb";
+import { createAdapterFactory, type DBAdapterDebugLogOption } from "better-auth/adapters";
+import { jsonify, StringRecordId } from "surrealdb";
 import { Surreal } from "surrealdb";
-import { withApplyDefault } from "./utils";
 
-interface SurrealConfig {
+/**
+ * SurrealDB adapter configuration
+ */
+export interface SurrealAdapterConfig {
+    /** SurrealDB connection address (e.g., "http://localhost:8000") */
     address: string;
+    /** Database username */
     username: string;
+    /** Database password */
     password: string;
+    /** Namespace to use */
     ns: string;
+    /** Database to use */
     db: string;
+    /** Enable debug logging */
+    debugLogs?: DBAdapterDebugLogOption;
+    /** Use plural table names */
+    usePlural?: boolean;
 }
 
-const createTransform = (options: BetterAuthOptions) => {
-    const schema = getAuthTables(options);
+/**
+ * SurrealDB adapter for Better-Auth
+ *
+ * @example
+ * ```typescript
+ * import { surrealAdapter } from "surrealdb-better-auth";
+ *
+ * const auth = betterAuth({
+ *     database: surrealAdapter({
+ *         address: "http://localhost:8000",
+ *         username: "root",
+ *         password: "root",
+ *         ns: "test",
+ *         db: "test",
+ *     }),
+ * });
+ * ```
+ */
+export const surrealAdapter = (config: SurrealAdapterConfig) => {
+    // Connection management
+    let db: Surreal | null = null;
+    let isConnecting = false;
+    let connectionPromise: Promise<Surreal> | null = null;
 
-    function transformSelect(select: string[], model: string): string[] {
-        if (!select || select.length === 0) return [];
-        return select.map((field) => getField(model, field));
-    }
-
-    function getField(model: string, field: string) {
-        if (field === "id") {
-            return field;
+    const ensureConnection = async (): Promise<Surreal> => {
+        if (db) {
+            try {
+                // Test if connection is still alive
+                await db.query("SELECT 1");
+                return db;
+            } catch {
+                // Connection is dead, reset and reconnect
+                db = null;
+            }
         }
 
-        const f = schema[model]?.fields[field];
-        return f?.fieldName || field;
-    }
+        if (isConnecting && connectionPromise) {
+            return connectionPromise;
+        }
 
-    return {
-        transformInput<T extends Record<string, unknown>>(
-            data: T,
-            model: string,
-            action: "update" | "create",
-        ) {
-            const transformedData: Record<string, unknown> =
-                action === "update"
-                    ? {}
-                    : {
-                        id: options.advanced?.generateId
-                            ? options.advanced.generateId({ model })
-                            : data['id'] || generateId(),
-                    };
-
-            const fields = schema[model]?.fields;
-            if (!fields) throw new Error(`Model ${model} not found in schema`);
-
-            for (const [field, fieldValue] of Object.entries(fields)) {
-                const value = data[field];
-                if (value === undefined) {
-                    continue;  // Skip undefined values, let SurrealDB defaults apply
-                }
-
-                transformedData[fieldValue.fieldName || field] = withApplyDefault(
-                    value,
-                    {
-                        ...fieldValue,
-                        fieldName: fieldValue.fieldName || field,
+        isConnecting = true;
+        connectionPromise = new Promise((resolve, reject) => {
+            const newDb = new Surreal();
+            newDb
+                .connect(config.address, {
+                    namespace: config.ns,
+                    database: config.db,
+                    auth: {
+                        username: config.username,
+                        password: config.password,
                     },
-                    action,
-                    model,
-                );
-            }
-
-            return transformedData;
-        },
-        transformOutput<T extends Record<string, unknown>>(
-            data: T,
-            model: string,
-            select: string[] = [],
-        ) {
-            if (!data) return null;
-            const transformedData: Record<string, unknown> =
-                data['id'] || data['_id']
-                    ? select.length === 0 || select.includes("id")
-                        ? { id: jsonify(data['id']) }
-                        : {}
-                    : {};
-
-            const tableSchema = schema[model]?.fields;
-            if (!tableSchema) throw new Error(`Model ${model} not found in schema`);
-
-            for (const key in tableSchema) {
-                if (select.length && !select.includes(key)) {
-                    continue;
-                }
-                const field = tableSchema[key];
-                if (field) {
-                    transformedData[key] = jsonify(data[field.fieldName || key]);
-                }
-            }
-            return transformedData as T;
-        },
-        convertWhereClause(where: Where[], model: string) {
-            return where
-                .map((clause) => {
-                    const { field: _field, value, operator } = clause;
-                    const field = getField(model, _field);
-
-                    // Handle null/undefined values
-                    if (value === undefined || value === null) {
-                        return `${field} = NONE`;
-                    }
-
-                    const v = value as unknown as RecordId;
-                    const isRecordId = !!v?.tb;
-                    switch (operator) {
-                        case "eq":
-                            return field === "id" || isRecordId
-                                ? `${field} = ${jsonify(value)}`
-                                : `${field} = '${jsonify(value)}'`;
-                        case "in":
-                            return `${field} IN [${jsonify(value)}]`;
-                        case "contains":
-                            return `${field} CONTAINS '${jsonify(value)}'`;
-                        case "starts_with":
-                            return `string::starts_with(${field},'${value}')`;
-                        case "ends_with":
-                            return `string::ends_with(${field},'${value}')`;
-                        default:
-                            if (field.endsWith("Id") || isRecordId || field === "id") {
-                                return `${field} = ${jsonify(value)}`;
-                            }
-                            return `${field} = '${jsonify(value)}'`;
-                    }
                 })
-                .join(" AND ");
-        },
-        transformSelect,
-        getField,
-    };
-};
-
-export const surrealAdapter =
-    (config: SurrealConfig) =>
-        (options: BetterAuthOptions): Adapter => {
-            let db: Surreal | null = null;
-            let isConnecting = false;
-            let connectionPromise: Promise<Surreal> | null = null;
-
-            const ensureConnection = async () => {
-                if (db) {
-                    try {
-                        // Test if connection is still alive
-                        await db.query("SELECT * FROM user LIMIT 1");
-                        return db;
-                    } catch (error) {
-                        console.error(
-                            "Connection is dead, resetting and reconnecting",
-                            error,
-                        );
-                        // Connection is dead, reset and reconnect
-                        db = null;
-                    }
-                }
-
-                if (isConnecting && connectionPromise) {
-                    return connectionPromise;
-                }
-
-                isConnecting = true;
-                connectionPromise = new Promise((resolve, reject) => {
-                    const newDb = new Surreal();
-                    newDb
-                        .connect(config.address, {
-                            namespace: config.ns,
-                            database: config.db,
-                            auth: {
-                                username: config.username,
-                                password: config.password,
-                            },
-                        })
-                        .then(() => {
-                            db = newDb;
-                            isConnecting = false;
-                            connectionPromise = null;
-                            resolve(newDb);
-                        })
-                        .catch((error) => {
-                            isConnecting = false;
-                            connectionPromise = null;
-                            reject(error);
-                        });
+                .then(() => {
+                    db = newDb;
+                    isConnecting = false;
+                    connectionPromise = null;
+                    resolve(newDb);
+                })
+                .catch((error) => {
+                    isConnecting = false;
+                    connectionPromise = null;
+                    reject(error);
                 });
+        });
 
-                return connectionPromise;
-            };
+        return connectionPromise;
+    };
 
-            const { transformInput, transformOutput, convertWhereClause, getField } =
-                createTransform(options);
+    /**
+     * Check if a string looks like a SurrealDB RecordId (format: table:id)
+     */
+    const isRecordIdString = (value: string): boolean => {
+        // RecordId format: table:id where table is alphanumeric and id is alphanumeric/uuid
+        // e.g., "user:abc123", "session:xyz", "account:microsoft-12345"
+        const recordIdPattern = /^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_\-⟨⟩]+$/;
+        return recordIdPattern.test(value);
+    };
+
+    /**
+     * Check if a field should be treated as containing a RecordId
+     * - `id` field always contains RecordIds
+     * - `userId`, `sessionId` are foreign keys to our tables
+     * - `accountId`, `providerId` are NOT RecordIds - they're string identifiers
+     */
+    const isRecordIdField = (field: string): boolean => {
+        // `id` is always a RecordId
+        if (field === "id") return true;
+        // Foreign keys to our tables
+        if (field === "userId" || field === "sessionId") return true;
+        // accountId and providerId are NOT RecordIds - they're OAuth identifiers
+        return false;
+    };
+
+    /**
+     * Serialize a value for SurrealQL queries
+     * - RecordId strings (table:id format) in RecordId fields are NOT quoted
+     * - Regular strings get JSON-quoted
+     * - Dates get converted to ISO strings
+     * - Arrays and objects use JSON.stringify
+     * - Numbers and booleans are used as-is
+     */
+    const serializeValue = (value: unknown, field?: string): string => {
+        if (value === undefined || value === null) {
+            return "NONE";
+        }
+        if (typeof value === "string") {
+            // Only treat as RecordId if:
+            // 1. The field is a known RecordId field (id, userId, sessionId)
+            // 2. AND the value looks like a RecordId
+            if (field && isRecordIdField(field) && isRecordIdString(value)) {
+                return value;
+            }
+            return JSON.stringify(value);
+        }
+        if (typeof value === "number" || typeof value === "boolean") {
+            return String(value);
+        }
+        if (value instanceof Date) {
+            return `d"${value.toISOString()}"`;
+        }
+        if (Array.isArray(value)) {
+            return `[${value.map(v => serializeValue(v)).join(", ")}]`;
+        }
+        if (typeof value === "object" && value !== null) {
+            // Check if it's a RecordId (has tb property)
+            if ("tb" in value) {
+                return jsonify(value);
+            }
+            return JSON.stringify(value);
+        }
+        return JSON.stringify(value);
+    };
+
+    /**
+     * Convert a where clause array to SurrealDB WHERE string
+     * Note: Field names are already transformed by the wrapper
+     */
+    const buildWhereClause = (
+        where: Array<{ field: string; value: unknown; operator?: string }>
+    ): string => {
+        if (!where || where.length === 0) return "";
+
+        return where
+            .map((clause) => {
+                const field = clause.field;
+                const value = clause.value;
+                const operator = clause.operator || "eq";
+
+                // Handle null/undefined values
+                if (value === undefined || value === null) {
+                    return `${field} = NONE`;
+                }
+
+                switch (operator) {
+                    case "eq":
+                        return `${field} = ${serializeValue(value, field)}`;
+                    case "ne":
+                        return `${field} != ${serializeValue(value, field)}`;
+                    case "gt":
+                        return `${field} > ${serializeValue(value, field)}`;
+                    case "gte":
+                        return `${field} >= ${serializeValue(value, field)}`;
+                    case "lt":
+                        return `${field} < ${serializeValue(value, field)}`;
+                    case "lte":
+                        return `${field} <= ${serializeValue(value, field)}`;
+                    case "in":
+                        return `${field} IN ${serializeValue(value, field)}`;
+                    case "contains":
+                        return `${field} CONTAINS ${serializeValue(value, field)}`;
+                    case "starts_with":
+                        return `string::starts_with(${field}, ${serializeValue(value, field)})`;
+                    case "ends_with":
+                        return `string::ends_with(${field}, ${serializeValue(value, field)})`;
+                    default:
+                        return `${field} = ${serializeValue(value, field)}`;
+                }
+            })
+            .join(" AND ");
+    };
+
+    /**
+     * Transform field values for SurrealDB
+     * - Convert *Id fields to StringRecordId
+     */
+    const transformValueForDB = (field: string, value: unknown): unknown => {
+        if (value === undefined || value === null) {
+            return value;
+        }
+
+        // Convert foreign key fields to RecordId
+        if (field.endsWith("Id") && typeof value === "string" && !field.startsWith("provider") && !field.startsWith("account")) {
+            // Extract the referenced model from field name (e.g., "userId" -> "user")
+            const refModel = field.slice(0, -2);
+            // Don't convert if it's already a RecordId string format
+            if (!value.includes(":")) {
+                return new StringRecordId(`${refModel}:${value}`);
+            }
+            return new StringRecordId(value);
+        }
+
+        return value;
+    };
+
+    return createAdapterFactory({
+        config: {
+            adapterId: "surrealdb",
+            adapterName: "SurrealDB",
+            debugLogs: config.debugLogs ?? false,
+            usePlural: config.usePlural ?? false,
+            supportsJSON: true,
+            supportsDates: true,
+            supportsBooleans: true,
+            supportsNumericIds: false, // SurrealDB uses string RecordIds
+            // Let the factory handle joins via multiple queries
+            supportsJoin: false,
+        },
+        adapter: ({ debugLog }) => {
+            // Note: The wrapper already handles:
+            // - Model name transformation (via getModelName)
+            // - Field name transformation (via transformInput/transformWhereClause)
+            // - Input/output data transformation
+            //
+            // Our job is just to execute the DB operations with the already-transformed data.
 
             return {
-                id: "surreal",
-                create: async <T extends Record<string, unknown>, R = T>({
-                    model,
-                    data,
-                }: { model: string; data: T }) => {
-                    const db = await ensureConnection();
-                    const transformed = transformInput(data, model, "create");
-                    const [result] = await db.create(model, transformed);
+                create: async ({ model, data }) => {
+                    const conn = await ensureConnection();
 
-                    if (!result) throw new SurrealDBQueryError("Failed to create record");
-                    return transformOutput(result, model) as R;
-                },
-                findOne: async <T>({
-                    model,
-                    where,
-                    select = [],
-                    join = {},
-                }: { model: string; where: Where[]; select?: string[]; join?: Record<string, boolean | { limit?: number }> }) => {
-                    const db = await ensureConnection();
-                    const whereClause = convertWhereClause(where, model);
-                    const selectClause =
-                        (select.length > 0 && select.map((f) => getField(model, f))) || [];
-
-                    // First query: get the main record
-                    const query =
-                        select.length > 0
-                            ? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
-                            : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
-
-                    const result = await db.query<[Record<string, unknown>[]]>(query);
-                    const output = result[0][0];
-
-                    if (!output) return null;
-
-                    const transformed = transformOutput(output, model, select) as Record<string, unknown>;
-
-                    // Fetch joined relations with separate queries
-                    for (const [joinModel, joinOpt] of Object.entries(join)) {
-                        if (!joinOpt) continue;
-
-                        const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
-                        let joinQuery: string;
-
-                        // For account join on user model, use userId foreign key
-                        if (joinModel === 'account' && model === 'user') {
-                            const userId = output['id'];
-                            joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
-                        } else if (joinModel === 'user' && model === 'session') {
-                            // Session has userId foreign key referencing user
-                            const userId = output['userId'];
-                            joinQuery = `SELECT * FROM user WHERE id = ${jsonify(userId)}${limit}`;
-                        } else {
-                            // Generic pattern: assume foreign key is modelId
-                            const foreignKey = `${model}Id`;
-                            const recordId = output['id'];
-                            joinQuery = `SELECT * FROM ${joinModel} WHERE ${foreignKey} = ${jsonify(recordId)}${limit}`;
-                        }
-
-                        const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
-                        // For single-record relations (like user from session), unwrap the array
-                        if (joinModel === 'user' && model === 'session') {
-                            transformed[joinModel] = joinResults[0] ? transformOutput(joinResults[0], joinModel) : null;
-                        } else {
-                            transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
-                                transformOutput(item, joinModel));
-                        }
+                    // Transform foreign key references to RecordIds
+                    const transformedData: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(data)) {
+                        transformedData[key] = transformValueForDB(key, value);
                     }
 
-                    return transformed as T | null;
+                    debugLog?.("create", { model, data: transformedData });
+
+                    const [result] = await conn.create(model, transformedData);
+
+                    if (!result) {
+                        throw new SurrealDBError("Failed to create record");
+                    }
+
+                    // Transform output - convert RecordId to string
+                    const output: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(result)) {
+                        output[key] = jsonify(value);
+                    }
+
+                    return output;
                 },
-                findMany: async <T>({
-                    model,
-                    where,
-                    sortBy,
-                    limit,
-                    offset,
-                }: {
-                    model: string;
-                    where?: Where[];
-                    sortBy?: { field: string; direction: "asc" | "desc" };
-                    limit?: number;
-                    offset?: number;
-                }) => {
-                    const db = await ensureConnection();
+
+                findOne: async ({ model, where }) => {
+                    const conn = await ensureConnection();
+                    const whereClause = buildWhereClause(where);
+
+                    const query = `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
+                    debugLog?.("findOne", { model, query });
+
+                    const [results] = await conn.query<[Record<string, unknown>[]]>(query);
+                    const record = results?.[0];
+
+                    if (!record) {
+                        return null;
+                    }
+
+                    // Transform output - convert RecordId to string
+                    const output: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(record)) {
+                        output[key] = jsonify(value);
+                    }
+
+                    return output;
+                },
+
+                findMany: async ({ model, where, limit, offset, sortBy }) => {
+                    const conn = await ensureConnection();
+
                     let query = `SELECT * FROM ${model}`;
-                    if (where) {
-                        const whereClause = convertWhereClause(where, model);
+
+                    if (where && where.length > 0) {
+                        const whereClause = buildWhereClause(where);
                         query += ` WHERE ${whereClause}`;
                     }
+
                     if (sortBy) {
-                        query += ` ORDER BY ${getField(model, sortBy.field)} ${sortBy.direction}`;
+                        query += ` ORDER BY ${sortBy.field} ${sortBy.direction.toUpperCase()}`;
                     }
+
                     if (limit !== undefined) {
                         query += ` LIMIT ${limit}`;
                     }
+
                     if (offset !== undefined) {
                         query += ` START ${offset}`;
                     }
-                    const [results] = await db.query<[Record<string, unknown>[]]>(query);
-                    return results.map((record) => transformOutput(record, model) as T);
+
+                    debugLog?.("findMany", { model, query });
+
+                    const [results] = await conn.query<[Record<string, unknown>[]]>(query);
+
+                    // Transform output - convert RecordId to string
+                    return (results || []).map((record) => {
+                        const output: Record<string, unknown> = {};
+                        for (const [key, value] of Object.entries(record)) {
+                            output[key] = jsonify(value);
+                        }
+                        return output;
+                    });
                 },
-                count: async ({ model, where }: { model: string; where?: Where[] }) => {
-                    const db = await ensureConnection();
-                    const whereClause = where ? convertWhereClause(where, model) : "";
-                    const query = whereClause
-                        ? `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`
-                        : `SELECT count() FROM ${model} GROUP ALL`;
 
-                    const [result] = await db.query<[Record<string, unknown>[]]>(query);
-                    const res = result[0];
+                update: async ({ model, where, update }) => {
+                    const conn = await ensureConnection();
+                    const whereClause = buildWhereClause(where);
 
-                    if (!res) throw new SurrealDBQueryError("Failed to count records");
-                    return Number(res['count']);
+                    // Transform foreign key references to RecordIds
+                    const transformedUpdate: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(update)) {
+                        transformedUpdate[key] = transformValueForDB(key, value);
+                    }
+
+                    const query = `UPDATE ${model} MERGE $data WHERE ${whereClause}`;
+                    debugLog?.("update", { model, query, data: transformedUpdate });
+
+                    const [results] = await conn.query<[Record<string, unknown>[]]>(query, {
+                        data: transformedUpdate,
+                    });
+
+                    const record = results?.[0];
+
+                    if (!record) {
+                        throw new SurrealDBError("Failed to update record");
+                    }
+
+                    // Transform output - convert RecordId to string
+                    const output: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(record)) {
+                        output[key] = jsonify(value);
+                    }
+
+                    return output;
                 },
-                update: async <T extends Record<string, unknown>, R = T>({
-                    model,
-                    where,
-                    update,
-                }: { model: string; where: Where[]; update: T }) => {
-                    const db = await ensureConnection();
-                    const whereClause = convertWhereClause(where, model);
-                    const transformedUpdate = transformInput(update, model, "update");
-                    const [result] = await db.query<[Record<string, unknown>[]]>(
-                        `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-                        {
-                            transformedUpdate,
-                        },
-                    );
 
-                    const output = result[0];
-                    if (!output) throw new SurrealDBQueryError("Failed to update record");
-                    return transformOutput(output, model) as R;
+                updateMany: async ({ model, where, update }) => {
+                    const conn = await ensureConnection();
+                    const whereClause = buildWhereClause(where);
+
+                    // Transform foreign key references to RecordIds
+                    const transformedUpdate: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(update)) {
+                        transformedUpdate[key] = transformValueForDB(key, value);
+                    }
+
+                    const query = `UPDATE ${model} MERGE $data WHERE ${whereClause}`;
+                    debugLog?.("updateMany", { model, query, data: transformedUpdate });
+
+                    const [results] = await conn.query<[Record<string, unknown>[]]>(query, {
+                        data: transformedUpdate,
+                    });
+
+                    return results?.length || 0;
                 },
-                delete: async ({ model, where }: { model: string; where: Where[] }) => {
-                    const db = await ensureConnection();
-                    const whereClause = convertWhereClause(where, model);
-                    await db.query(`DELETE FROM ${model} WHERE ${whereClause}`);
+
+                delete: async ({ model, where }) => {
+                    const conn = await ensureConnection();
+                    const whereClause = buildWhereClause(where);
+
+                    const query = `DELETE FROM ${model} WHERE ${whereClause}`;
+                    debugLog?.("delete", { model, query });
+
+                    await conn.query(query);
                 },
-                deleteMany: async ({
-                    model,
-                    where,
-                }: { model: string; where: Where[] }) => {
-                    const db = await ensureConnection();
-                    const whereClause = convertWhereClause(where, model);
-                    const [result] = await db.query<[Record<string, unknown>[]]>(
-                        `DELETE FROM ${model} WHERE ${whereClause}`,
-                    );
-                    return result.length;
+
+                deleteMany: async ({ model, where }) => {
+                    const conn = await ensureConnection();
+                    const whereClause = buildWhereClause(where);
+
+                    const query = `DELETE FROM ${model} WHERE ${whereClause}`;
+                    debugLog?.("deleteMany", { model, query });
+
+                    const [results] = await conn.query<[Record<string, unknown>[]]>(query);
+                    return results?.length || 0;
                 },
-                updateMany: async <T extends Record<string, unknown>, R = T>({
-                    model,
-                    where,
-                    update,
-                }: { model: string; where: Where[]; update: T }) => {
-                    const db = await ensureConnection();
-                    const whereClause = convertWhereClause(where, model);
-                    const transformedUpdate = transformInput(update, model, "update");
-                    const [result] = await db.query<[Record<string, unknown>[]]>(
-                        `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-                        {
-                            transformedUpdate,
-                        },
-                    );
 
-                    const output = result[0];
-                    if (!output) throw new SurrealDBQueryError("Failed to update many records");
-                    return transformOutput(output, model) as R;
+                count: async ({ model, where }) => {
+                    const conn = await ensureConnection();
+
+                    let query: string;
+                    if (where && where.length > 0) {
+                        const whereClause = buildWhereClause(where);
+                        query = `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`;
+                    } else {
+                        query = `SELECT count() FROM ${model} GROUP ALL`;
+                    }
+
+                    debugLog?.("count", { model, query });
+
+                    const [results] = await conn.query<[Array<{ count: number }>]>(query);
+                    return results?.[0]?.count || 0;
                 },
-                // Transaction support - SurrealDB doesn't have built-in transaction API,
-                // so we execute operations sequentially without actual transaction isolation
-                transaction: async <R>(callback: (trx: Omit<Adapter, 'transaction'>) => Promise<R>): Promise<R> => {
-                    // Create a transaction adapter that excludes the transaction method itself
-                    const trxAdapter: Omit<Adapter, 'transaction'> = {
-                        id: "surreal",
-                        create: async <T extends Record<string, unknown>, R = T>({
-                            model,
-                            data,
-                        }: { model: string; data: T }) => {
-                            const db = await ensureConnection();
-                            const transformed = transformInput(data, model, "create");
-                            const [result] = await db.create(model, transformed);
-                            if (!result) throw new SurrealDBQueryError("Failed to create record");
-                            return transformOutput(result, model) as R;
-                        },
-                        findOne: async <T>({
-                            model,
-                            where,
-                            select = [],
-                            join = {},
-                        }: { model: string; where: Where[]; select?: string[]; join?: Record<string, boolean | { limit?: number }> }) => {
-                            const db = await ensureConnection();
-                            const whereClause = convertWhereClause(where, model);
-                            const selectClause =
-                                (select.length > 0 && select.map((f) => getField(model, f))) || [];
 
-                            // First query: get the main record
-                            const query =
-                                select.length > 0
-                                    ? `SELECT ${selectClause.join(", ")} FROM ${model} WHERE ${whereClause} LIMIT 1`
-                                    : `SELECT * FROM ${model} WHERE ${whereClause} LIMIT 1`;
-                            const result = await db.query<[Record<string, unknown>[]]>(query);
-                            const output = result[0][0];
-                            if (!output) return null;
+                options: config,
+            };
+        },
+    });
+};
 
-                            const transformed = transformOutput(output, model, select) as Record<string, unknown>;
-
-                            // Fetch joined relations with separate queries
-                            for (const [joinModel, joinOpt] of Object.entries(join)) {
-                                if (!joinOpt) continue;
-
-                                const limit = typeof joinOpt === 'object' && joinOpt.limit ? ` LIMIT ${joinOpt.limit}` : '';
-                                let joinQuery: string;
-
-                                if (joinModel === 'account' && model === 'user') {
-                                    const userId = output['id'];
-                                    joinQuery = `SELECT * FROM account WHERE userId = ${jsonify(userId)}${limit}`;
-                                } else if (joinModel === 'user' && model === 'session') {
-                                    // Session has userId foreign key referencing user
-                                    const userId = output['userId'];
-                                    joinQuery = `SELECT * FROM user WHERE id = ${jsonify(userId)}${limit}`;
-                                } else {
-                                    const foreignKey = `${model}Id`;
-                                    const recordId = output['id'];
-                                    joinQuery = `SELECT * FROM ${joinModel} WHERE ${foreignKey} = ${jsonify(recordId)}${limit}`;
-                                }
-
-                                const [joinResults] = await db.query<[Record<string, unknown>[]]>(joinQuery);
-                                // For single-record relations (like user from session), unwrap the array
-                                if (joinModel === 'user' && model === 'session') {
-                                    transformed[joinModel] = joinResults[0] ? transformOutput(joinResults[0], joinModel) : null;
-                                } else {
-                                    transformed[joinModel] = joinResults.map((item: Record<string, unknown>) =>
-                                        transformOutput(item, joinModel));
-                                }
-                            }
-
-                            return transformed as T | null;
-                        },
-                        findMany: async <T>({
-                            model,
-                            where,
-                            sortBy,
-                            limit,
-                            offset,
-                        }: {
-                            model: string;
-                            where?: Where[];
-                            sortBy?: { field: string; direction: "asc" | "desc" };
-                            limit?: number;
-                            offset?: number;
-                        }) => {
-                            const db = await ensureConnection();
-                            let query = `SELECT * FROM ${model}`;
-                            if (where) {
-                                const whereClause = convertWhereClause(where, model);
-                                query += ` WHERE ${whereClause}`;
-                            }
-                            if (sortBy) {
-                                query += ` ORDER BY ${getField(model, sortBy.field)} ${sortBy.direction}`;
-                            }
-                            if (limit !== undefined) {
-                                query += ` LIMIT ${limit}`;
-                            }
-                            if (offset !== undefined) {
-                                query += ` START ${offset}`;
-                            }
-                            const [results] = await db.query<[Record<string, unknown>[]]>(query);
-                            return results.map((record) => transformOutput(record, model) as T);
-                        },
-                        count: async ({ model, where }: { model: string; where?: Where[] }) => {
-                            const db = await ensureConnection();
-                            const whereClause = where ? convertWhereClause(where, model) : "";
-                            const query = whereClause
-                                ? `SELECT count() FROM ${model} WHERE ${whereClause} GROUP ALL`
-                                : `SELECT count() FROM ${model} GROUP ALL`;
-                            const [result] = await db.query<[Record<string, unknown>[]]>(query);
-                            const res = result[0];
-                            if (!res) throw new SurrealDBQueryError("Failed to count records");
-                            return Number(res['count']);
-                        },
-                        update: async <T extends Record<string, unknown>, R = T>({
-                            model,
-                            where,
-                            update,
-                        }: { model: string; where: Where[]; update: T }) => {
-                            const db = await ensureConnection();
-                            const whereClause = convertWhereClause(where, model);
-                            const transformedUpdate = transformInput(update, model, "update");
-                            const [result] = await db.query<[Record<string, unknown>[]]>(
-                                `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-                                { transformedUpdate },
-                            );
-                            const output = result[0];
-                            if (!output) throw new SurrealDBQueryError("Failed to update record");
-                            return transformOutput(output, model) as R;
-                        },
-                        delete: async ({ model, where }: { model: string; where: Where[] }) => {
-                            const db = await ensureConnection();
-                            const whereClause = convertWhereClause(where, model);
-                            await db.query(`DELETE FROM ${model} WHERE ${whereClause}`);
-                        },
-                        deleteMany: async ({ model, where }: { model: string; where: Where[] }) => {
-                            const db = await ensureConnection();
-                            const whereClause = convertWhereClause(where, model);
-                            const [result] = await db.query<[Record<string, unknown>[]]>(
-                                `DELETE FROM ${model} WHERE ${whereClause}`,
-                            );
-                            return result.length;
-                        },
-                        updateMany: async <T extends Record<string, unknown>, R = T>({
-                            model,
-                            where,
-                            update,
-                        }: { model: string; where: Where[]; update: T }) => {
-                            const db = await ensureConnection();
-                            const whereClause = convertWhereClause(where, model);
-                            const transformedUpdate = transformInput(update, model, "update");
-                            const [result] = await db.query<[Record<string, unknown>[]]>(
-                                `UPDATE ${model} MERGE $transformedUpdate WHERE ${whereClause}`,
-                                { transformedUpdate },
-                            );
-                            const output = result[0];
-                            if (!output) throw new SurrealDBQueryError("Failed to update many records");
-                            return transformOutput(output, model) as R;
-                        },
-                    };
-                    return callback(trxAdapter);
-                },
-            } satisfies Adapter;
-        };
-
-
-export class SurrealDBQueryError extends Error {
+/**
+ * Custom error class for SurrealDB adapter errors
+ */
+export class SurrealDBError extends Error {
     constructor(message: string) {
         super(message);
-        this.name = "SurrealDBQueryError";
+        this.name = "SurrealDBError";
     }
 }
+
+// Re-export for backwards compatibility
+export { SurrealDBError as SurrealDBQueryError };

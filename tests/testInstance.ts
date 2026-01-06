@@ -16,6 +16,15 @@ import { getBaseURL } from "../utlis/getBaseURL";
 import { surrealAdapter } from "..";
 import { getDatabase } from "../db/surreal";
 
+// Default test config for SurrealDB
+const TEST_SURREAL_CONFIG = {
+  address: "http://127.0.0.1:8000",
+  username: "root",
+  password: "root",
+  ns: "better_auth_test",
+  db: "better_auth_test",
+};
+
 export async function getTestInstance<
   O extends Partial<BetterAuthOptions>,
   C extends ClientOptions,
@@ -29,11 +38,15 @@ export async function getTestInstance<
     testWith?: "surreal";
   },
 ) {
-  const db = await getDatabase({
-    url: "http://127.0.0.1:8000/rpc",
-    namespace: "better_auth_test",
-    database: "better_auth_test",
-    auth: { username: "root", password: "root" },
+  // Get a raw Surreal connection for cleanup operations
+  const rawDb = await getDatabase({
+    url: `${TEST_SURREAL_CONFIG.address}/rpc`,
+    namespace: TEST_SURREAL_CONFIG.ns,
+    database: TEST_SURREAL_CONFIG.db,
+    auth: {
+      username: TEST_SURREAL_CONFIG.username,
+      password: TEST_SURREAL_CONFIG.password
+    },
   });
 
   const opts = {
@@ -48,7 +61,10 @@ export async function getTestInstance<
       },
     },
     secret: "better-auth.secret",
-    database: surrealAdapter(db),
+    database: surrealAdapter({
+      ...TEST_SURREAL_CONFIG,
+      debugLogs: false,
+    }),
     emailAndPassword: {
       enabled: true,
     },
@@ -89,7 +105,8 @@ export async function getTestInstance<
   await createTestUser();
 
   afterAll(async () => {
-    await db.query("DELETE account; DELETE session; DELETE user;");
+    await rawDb.query("DELETE account; DELETE session; DELETE user;");
+    await rawDb.close();
     return;
   });
 
@@ -218,5 +235,6 @@ export async function getTestInstance<
     customFetchImpl,
     sessionSetter,
     db: await getAdapter(auth.options),
+    rawDb, // Expose raw connection for cleanup
   };
 }
